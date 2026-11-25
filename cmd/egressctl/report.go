@@ -288,8 +288,10 @@ func cmdReport(args []string) error {
 	}
 
 	if *format == "json" || *format == "csv" {
-		if err := os.MkdirAll(*out, 0o755); err != nil {
-			return err
+		if *out != "" {
+			if err := os.MkdirAll(*out, 0o755); err != nil {
+				return err
+			}
 		}
 		f, err := os.Create(filepath.Join(*out, "egress-report."+*format))
 		if err != nil {
