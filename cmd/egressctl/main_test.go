@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/snbuback/kasil-egress/pkg/k8s"
 )
 
 // isolateEnv removes every ambient input a command might read, so a test never
@@ -161,5 +163,27 @@ func TestUnexpectedPositional(t *testing.T) {
 	}
 	if err := run([]string{"version", "extra"}); err == nil || !strings.Contains(err.Error(), "unexpected argument") {
 		t.Fatalf("version accepted a stray argument: %v", err)
+	}
+}
+
+// exemptionReason is the wiring the live lint gate uses: both a namespace and
+// a workload exemption must reach LintTarget.Exempt, or a committed policy for
+// kube-system lints as if nothing were wrong.
+func TestExemptionReasonCoversBothScopes(t *testing.T) {
+	cases := []struct {
+		w    k8s.Workload
+		want bool
+	}{
+		{k8s.Workload{Namespace: "kube-system", Kind: "DaemonSet", Name: "cilium", Selector: map[string]string{"k8s-app": "cilium"}}, true},
+		{k8s.Workload{Namespace: "piraeus-datastore", Kind: "DaemonSet", Name: "linstor-csi"}, true},
+		{k8s.Workload{Namespace: "victoria", Kind: "Deployment", Name: "vmagent"}, true},
+		{k8s.Workload{Namespace: "homeassistant", Kind: "Deployment", Name: "music-assistant-server"}, true},
+		{k8s.Workload{Namespace: "victoria", Kind: "Deployment", Name: "grafana"}, false},
+		{k8s.Workload{Namespace: "homeassistant", Kind: "Deployment", Name: "eufy"}, false},
+	}
+	for _, c := range cases {
+		if got := exemptionReason(c.w) != ""; got != c.want {
+			t.Errorf("%s: exempt=%v, want %v", c.w.Key(), got, c.want)
+		}
 	}
 }

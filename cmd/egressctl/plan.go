@@ -274,7 +274,6 @@ func cmdLint(args []string) error {
 		// for Job/CronJob/Pod the object name carries a kind suffix that
 		// trimming "-egress" cannot recover.
 		opts.Targets = make([]policy.LintTarget, 0, len(idx.Workloads()))
-		exemptions := policy.DefaultExemptions()
 		for _, w := range idx.Workloads() {
 			sel, _ := ps.Selecting(w)
 			t := policy.LintTarget{
@@ -283,9 +282,7 @@ func cmdLint(args []string) error {
 				Name:       w.Name,
 				Selector:   w.Selector,
 				Constraint: policy.NewConstraint(sel),
-			}
-			if ex, ok := exemptions.Match(w.Model()); ok && ex.Workload != "" {
-				t.Exempt = ex.Reason
+				Exempt:     exemptionReason(w),
 			}
 			opts.Targets = append(opts.Targets, t)
 		}
@@ -318,4 +315,15 @@ func countFiles(dir string) int {
 		return nil
 	})
 	return n
+}
+
+// exemptionReason returns the documented reason a workload is not policed, or
+// "" when it must be. Both scopes count: a namespace exemption (kube-system)
+// and a workload one (victoria/vmagent). A committed file that targets either
+// is a mistake — `plan` never writes one — so live lint warns about it.
+func exemptionReason(w k8s.Workload) string {
+	if ex, ok := policy.DefaultExemptions().Match(w.Model()); ok {
+		return ex.Reason
+	}
+	return ""
 }

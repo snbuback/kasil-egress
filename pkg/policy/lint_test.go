@@ -412,6 +412,25 @@ func TestLintWarnsOnExemptTarget(t *testing.T) {
 	}
 }
 
+// A namespace exemption is as binding as a workload one: a committed policy
+// that targets kube-system contradicts §10.4, and live lint must say so.
+func TestLintWarnsOnNamespaceExemptTarget(t *testing.T) {
+	body := strings.Replace(goodPolicy, "namespace: frigate", "namespace: kube-system", 1)
+	body = strings.Replace(body, "app.kubernetes.io/name: frigate", "app: coredns", 1)
+	opts := lintOpts()
+	opts.Targets = []LintTarget{{
+		Namespace: "kube-system",
+		Kind:      "Deployment",
+		Name:      "coredns",
+		Selector:  map[string]string{"app": "coredns"},
+		Exempt:    "CNI/DNS/control plane",
+	}}
+	issues := issuesFor(t, body, opts)
+	if !hasIssue(issues, "documented exemption") {
+		t.Fatalf("expected the exemption warning, got %v", issues)
+	}
+}
+
 func TestLintDuplicateSelectors(t *testing.T) {
 	dir := t.TempDir()
 	writePolicy(t, dir, "a.yaml", goodPolicy)
