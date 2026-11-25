@@ -1,10 +1,25 @@
 > **Status:** approved (review round 3, contract lens) and implemented in this
 > repository. This is the ADR: read it before changing the data model, the
 > policy generator or the exporter configuration. Implementation notes live in
-> `docs/runbooks/`. The only intentional deviation from this text is that
-> `blocked_flow.id` uses an explicit sequence instead of `GENERATED ALWAYS AS
-> IDENTITY`, because identity columns are not supported on every PostgreSQL
-> version on a partitioned parent.
+> `docs/runbooks/`. Three intentional deviations from this text, recorded here
+> so a later reader does not "fix" them back:
+>
+> 1. `blocked_flow.id` uses an explicit sequence instead of `GENERATED ALWAYS
+>    AS IDENTITY`, because identity columns are not supported on every
+>    PostgreSQL version on a partitioned parent.
+> 2. There is no separate schema-migration Job (§12 item 2): `egressd`
+>    self-migrates the schema at startup. The DDL is idempotent and the
+>    collector is a DaemonSet, so the first pod to start creates the schema
+>    under the same role that writes it.
+> 3. `Constraint.Allows` tests membership in the **union** of the remaining
+>    (foreign) policies, not in each one separately. Cilium policy is additive,
+>    so a rule inside the union cannot widen the endpoint; a rule outside it
+>    can, and is refused. Pipeline-owned objects — the baseline CCNP, the
+>    exemption no-ops and every generated `<workload>-egress` — are marked
+>    `egress.kasil.io/owned: "true"` and excluded from the constraint set: they
+>    are the tool's own output and are replaced wholesale on the next `plan`,
+>    so treating a committed shadow policy as a foreign constraint would
+>    deadlock its own regeneration.
 
 # Strict egress for the kasil cluster — design
 
@@ -851,6 +866,8 @@ Rule-generation rules (deterministic, so reviewers can trust the output):
 | `plan` | Resolves all `CiliumNetworkPolicy`, `CiliumClusterwideNetworkPolicy` and `CiliumEgressGatewayPolicy` objects that select the workload. With none, generation is unchanged. With one, the plan emits rules **only** for peers that policy already permits; observed edges outside it are printed as `pre-policed-dropped` (traffic that was already denied, never a rule). If the existing policy does not enable egress default-deny (so it constrains nothing), generation is skipped and the workload is reported `PRE-POLICED` for a human decision. The generated file carries `egress.kasil.io/pre-policed: <kind>/<name>`. |
 | `lint` | Fails when a candidate CNP's egress rules are not a subset of what **every** existing selecting policy allows — i.e. when the union would widen the endpoint's allowed set. The only escape is explicit: `--ack-pre-policed <kind>/<name>` records the acknowledgement in the policy header and requires the reviewed diff to show the widening. Default is fail. |
 | `diff` | Prints the pre-existing policy as a constraint block: its allowed peers/ports, the observed edges inside it, and the observed edges outside it (already dropped — they are evidence, not candidates for allow). |
+
+**Which objects count as constraints.** Every policy object this pipeline creates carries `egress.kasil.io/owned: "true"` — the chart's baseline and exemption CCNPs as a label, the rendered `<workload>-egress` CNPs as an annotation. `report`, `plan`, `diff` and `lint` exclude owned objects from the constraint set and from the `PRE-POLICED` flag: they are the pipeline's own output, replaced wholesale on the next plan, so a committed shadow policy can never block its own regeneration or turn the flip-to-enforce gate into a permanent gap. A genuinely foreign policy that selects a workload without constraining egress still blocks generation until a human names it with `--ack-pre-policed <kind>/<name>`; the acknowledgement is recorded on the rendered object and does not carry over to a newly added policy.
 
 In practice `via-vpn-isolation`'s `toEntities: [world]` (all ports) leaves external traffic essentially unconstrained; the part that bites is its DNS-only in-cluster half — so the widening risk this rule exists to stop is **peer-to-peer**, not FQDN.
 

@@ -237,7 +237,9 @@ func Markdown(w io.Writer, in Input, namespace string) error {
 		fmt.Fprintf(w, "%s\n", fanOut)
 		if len(x.Candidate.Rules) > 0 {
 			fmt.Fprintf(w, "\nsuggested policy (review, not applied):\n\n```yaml\n")
-			body, err := policy.Render(x.Candidate, policy.Options{})
+			// Shadow, like `egressctl plan`'s default: the report is a Phase 1
+			// artifact and must never suggest an enforcing policy.
+			body, err := policy.Render(x.Candidate, policy.Options{Shadow: true})
 			if err == nil {
 				fmt.Fprintf(w, "%s", body)
 			} else {

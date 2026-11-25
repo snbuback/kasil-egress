@@ -71,7 +71,7 @@ func run(args []string) error {
 func usage() {
 	fmt.Fprint(os.Stderr, `egressctl — egress inventory and policy generation
 
-  report   [--all|--ns N] [--out DIR] [--format md|csv|json] [--coverage] [--show-policy-inventory]
+  report   [--all|--ns N] [--out DIR] [--format md|csv|json] [--coverage] [--show-policy-inventory] [--ack-pre-policed KIND/NAME]
   plan     [--ns N] [--out DIR] [--ack-pre-policed KIND/NAME] [--enforce]
   diff     [--ns N]
   lint     DIR [--allow-world-broad] [--allow-patterns] [--ack-pre-policed KIND/NAME]

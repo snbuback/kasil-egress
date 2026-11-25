@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/snbuback/kasil-egress/pkg/k8s"
 )
 
 // Render turns a candidate into a CiliumNetworkPolicy document.
@@ -25,7 +27,10 @@ func Render(c Candidate, opts Options) ([]byte, error) {
 			Name:      RuleName(c.Workload),
 			Namespace: c.Workload.Namespace,
 			Annotations: map[string]string{
-				"egress.kasil.io/generated-from": opts.GeneratedFrom,
+				// Marks the object as this pipeline's own output so future
+				// runs never treat it as a foreign constraint (see
+				// k8s.OwnedKey).
+				k8s.OwnedKey: k8s.OwnedValue,
 			},
 		},
 		Spec: spec{
@@ -33,6 +38,9 @@ func Render(c Candidate, opts Options) ([]byte, error) {
 			EndpointSelector:  selector{MatchLabels: c.Workload.Selector},
 			EnableDefaultDeny: enableDefaultDeny{Egress: !opts.Shadow},
 		},
+	}
+	if opts.GeneratedFrom != "" {
+		doc.Metadata.Annotations["egress.kasil.io/generated-from"] = opts.GeneratedFrom
 	}
 	if len(c.PrePoliced) > 0 {
 		doc.Metadata.Annotations["egress.kasil.io/pre-policed"] = strings.Join(c.PrePoliced, ",")

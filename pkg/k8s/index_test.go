@@ -5,18 +5,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 func fakeAPI(t *testing.T) *httptest.Server {
 	t.Helper()
-	pod := func(ns, name, uid string, labels map[string]string, owners []ownerRef) map[string]any {
+	pod := func(ns, name, uid, node string, labels map[string]string, owners []ownerRef, images ...string) map[string]any {
+		var containers []map[string]any
+		for _, img := range images {
+			containers = append(containers, map[string]any{"name": "c", "image": img})
+		}
 		return map[string]any{
 			"metadata": map[string]any{
 				"name": name, "namespace": ns, "uid": uid,
 				"labels": labels, "ownerReferences": owners,
 			},
-			"spec": map[string]any{"nodeName": "kube2.kasil.cloud"},
+			"spec": map[string]any{"nodeName": node, "containers": containers},
 		}
 	}
 	rs := map[string]any{
@@ -28,7 +33,18 @@ func fakeAPI(t *testing.T) *httptest.Server {
 	}
 	deploy := map[string]any{
 		"metadata": map[string]any{"name": "frigate", "namespace": "frigate", "labels": map[string]string{"app": "frigate"}},
-		"spec":     map[string]any{"selector": map[string]any{"matchLabels": map[string]string{"app": "frigate"}}},
+		"spec": map[string]any{
+			"replicas": 2,
+			"selector": map[string]any{"matchLabels": map[string]string{"app": "frigate"}},
+		},
+	}
+	// Scaled to zero: no pods, but the desired replica count is still known.
+	idle := map[string]any{
+		"metadata": map[string]any{"name": "idle", "namespace": "default", "labels": map[string]string{"app": "idle"}},
+		"spec": map[string]any{
+			"replicas": 3,
+			"selector": map[string]any{"matchLabels": map[string]string{"app": "idle"}},
+		},
 	}
 	job := map[string]any{
 		"metadata": map[string]any{
@@ -43,20 +59,33 @@ func fakeAPI(t *testing.T) *httptest.Server {
 	}
 	sts := map[string]any{
 		"metadata": map[string]any{"name": "hermes", "namespace": "hermes"},
-		"spec":     map[string]any{"selector": map[string]any{"matchLabels": map[string]string{"app.kubernetes.io/name": "hermes"}}},
+		"spec": map[string]any{
+			"replicas": 1,
+			"selector": map[string]any{"matchLabels": map[string]string{"app.kubernetes.io/name": "hermes"}},
+		},
 	}
 
 	lists := map[string][]any{
 		"/api/v1/pods": {
-			pod("frigate", "frigate-7d9f8c6b5-abcde", "uid-1", map[string]string{"app": "frigate", "pod-template-hash": "7d9f8c6b5"},
-				[]ownerRef{{Kind: "ReplicaSet", Name: "frigate-7d9f8c6b5", Controller: true}}),
-			pod("renovate", "renovate-29384756-x7k2p", "uid-2", map[string]string{"app": "renovate", "job-name": "renovate-29384756"},
-				[]ownerRef{{Kind: "Job", Name: "renovate-29384756", Controller: true}}),
-			pod("hermes", "hermes-0", "uid-3", map[string]string{"app.kubernetes.io/name": "hermes"},
-				[]ownerRef{{Kind: "StatefulSet", Name: "hermes", Controller: true}}),
-			pod("default", "debug-shell", "uid-4", map[string]string{"run": "debug"}, nil),
+			pod("frigate", "frigate-7d9f8c6b5-abcde", "uid-1", "kube2.kasil.cloud",
+				map[string]string{"app": "frigate", "pod-template-hash": "7d9f8c6b5"},
+				[]ownerRef{{Kind: "ReplicaSet", Name: "frigate-7d9f8c6b5", Controller: true}},
+				"ghcr.io/blakeblackshear/frigate:0.18.3"),
+			pod("frigate", "frigate-7d9f8c6b5-fghij", "uid-5", "kube3.kasil.cloud",
+				map[string]string{"app": "frigate", "pod-template-hash": "7d9f8c6b5"},
+				[]ownerRef{{Kind: "ReplicaSet", Name: "frigate-7d9f8c6b5", Controller: true}},
+				"ghcr.io/blakeblackshear/frigate:0.18.3"),
+			pod("renovate", "renovate-29384756-x7k2p", "uid-2", "kube2.kasil.cloud",
+				map[string]string{"app": "renovate", "job-name": "renovate-29384756"},
+				[]ownerRef{{Kind: "Job", Name: "renovate-29384756", Controller: true}},
+				"ghcr.io/renovatebot/renovate:41.1.0"),
+			pod("hermes", "hermes-0", "uid-3", "kube1.kasil.cloud",
+				map[string]string{"app.kubernetes.io/name": "hermes"},
+				[]ownerRef{{Kind: "StatefulSet", Name: "hermes", Controller: true}},
+				"ghcr.io/snbuback/hermes:1.2.3"),
+			pod("default", "debug-shell", "uid-4", "kube4.kasil.cloud", map[string]string{"run": "debug"}, nil, "busybox:1.36"),
 		},
-		"/apis/apps/v1/deployments":  {deploy},
+		"/apis/apps/v1/deployments":  {deploy, idle},
 		"/apis/apps/v1/statefulsets": {sts},
 		"/apis/apps/v1/daemonsets":   {},
 		"/apis/apps/v1/replicasets":  {rs},
@@ -131,5 +160,27 @@ func TestIndexResolve(t *testing.T) {
 
 	if got := len(idx.Workloads()); got < 4 {
 		t.Errorf("Workloads() = %d, want at least 4", got)
+	}
+
+	// The report header gets its replicas/nodes/images from the index.
+	m := idx.Meta(Workload{Namespace: "frigate", Kind: "Deployment", Name: "frigate"})
+	if m.Replicas != 2 {
+		t.Errorf("frigate replicas = %d, want 2", m.Replicas)
+	}
+	if got, want := strings.Join(m.Nodes, ","), "kube2.kasil.cloud,kube3.kasil.cloud"; got != want {
+		t.Errorf("frigate nodes = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(m.Images, ","), "ghcr.io/blakeblackshear/frigate:0.18.3"; got != want {
+		t.Errorf("frigate images = %q, want %q", got, want)
+	}
+
+	// A scaled-to-zero workload still reports its spec.replicas.
+	if m := idx.Meta(Workload{Namespace: "default", Kind: "Deployment", Name: "idle"}); m.Replicas != 3 {
+		t.Errorf("idle replicas = %d, want 3 (spec.replicas fallback)", m.Replicas)
+	}
+
+	// A workload known only from the database has no live facts.
+	if m := idx.Meta(Workload{Namespace: "gone", Kind: "Deployment", Name: "gone"}); m.Replicas != 0 || len(m.Nodes) != 0 {
+		t.Errorf("unknown workload meta = %+v, want zero value", m)
 	}
 }

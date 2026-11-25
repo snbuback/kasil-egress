@@ -68,7 +68,8 @@ func cmdPlan(args []string) error {
 			reason := "no rules"
 			for _, s := range c.Skipped {
 				if s.Reason == "pre-policed-skip" {
-					reason = "pre-policed: a selecting policy constrains nothing, needs a human decision"
+					reason = fmt.Sprintf("pre-policed: %s selects it but constrains no egress — needs a human decision (--ack-pre-policed <kind>/<name>)",
+						strings.Join(c.PrePoliced, ", "))
 				}
 			}
 			problems = append(problems, fmt.Sprintf("%s: %s", short(c.Workload), reason))
@@ -226,10 +227,20 @@ func cmdLint(args []string) error {
 		if err != nil {
 			return err
 		}
-		opts.Constraints = map[string]*policy.Constraint{}
+		// Resolve the ceiling per workload, not per policy name: a policy's
+		// endpointSelector is what identifies the workload it belongs to, and
+		// for Job/CronJob/Pod the object name carries a kind suffix that
+		// trimming "-egress" cannot recover.
+		opts.Targets = make([]policy.LintTarget, 0, len(idx.Workloads()))
 		for _, w := range idx.Workloads() {
 			sel, _ := ps.Selecting(w)
-			opts.Constraints[w.Namespace+"/"+w.Name] = policy.NewConstraint(sel)
+			opts.Targets = append(opts.Targets, policy.LintTarget{
+				Namespace:  w.Namespace,
+				Kind:       w.Kind,
+				Name:       w.Name,
+				Selector:   w.Selector,
+				Constraint: policy.NewConstraint(sel),
+			})
 		}
 	}
 

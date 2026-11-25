@@ -170,8 +170,9 @@ func Build(w model.Workload, edges []model.Edge, opts Options) Candidate {
 
 	// Any recorded pre-existing constraint filters the rules and records what
 	// it removed: those edges were already being dropped before this tool
-	// existed, and re-allowing them would widen the isolation.
-	if opts.Constraint != nil && opts.Constraint.Active() && opts.AckPrePoliced == "" {
+	// existed, and re-allowing them would widen the isolation. Only an
+	// acknowledgement that names a constraining policy lifts the filter.
+	if opts.Constraint != nil && opts.Constraint.Active() && !opts.Constraint.AcknowledgedActive(opts.AckPrePoliced) {
 		var kept []Rule
 		for _, k := range order {
 			r := acc[k]

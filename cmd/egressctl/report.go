@@ -34,6 +34,7 @@ type auditInput struct {
 	candidates []policy.Candidate
 	workloads  []report.Workload
 	policySet  *k8s.PolicySet
+	policyRows []report.PolicyRow
 	index      *k8s.Index
 	exemptions []report.Exemption
 	window     string
@@ -82,6 +83,7 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 	}
 
 	in := &auditInput{policySet: ps, index: idx, exemptions: defaultExemptions}
+	in.policyRows = policyInventory(ps, idx)
 	var from, to time.Time
 	for _, w := range wls {
 		if namespace != "" && w.Namespace != namespace {
@@ -95,7 +97,10 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 
 		wm := w.Model()
 		var c policy.Candidate
-		if constraint.SkipGeneration() {
+		if constraint.BlocksGeneration(o.AckPrePoliced) {
+			// A foreign policy selects the workload but constrains nothing:
+			// a human has to name it with --ack-pre-policed before the tool
+			// will emit a policy that unions with it.
 			c = policy.Candidate{Workload: wm, PrePoliced: constraint.Refs()}
 			c.Skipped = append(c.Skipped, policy.Skipped{Reason: "pre-policed-skip"})
 		} else {
@@ -107,9 +112,13 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 		}
 		c.EgressGateway = gw
 		flags := report.ComputeFlags(wm, wedges, c.PrePoliced)
+		wmeta := idx.Meta(w)
 		in.candidates = append(in.candidates, c)
 		in.workloads = append(in.workloads, report.Workload{
 			Workload:  wm,
+			Replicas:  wmeta.Replicas,
+			Nodes:     wmeta.Nodes,
+			Images:    wmeta.Images,
 			Candidate: c,
 			Edges:     wedges,
 			Flags:     flags,
@@ -132,6 +141,46 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 	return in, nil
 }
 
+// policyInventory renders the live policy objects for the summary. Pipeline
+// objects are included but marked as such: they are the tool's own baseline
+// and exemptions, not foreign constraints.
+func policyInventory(ps *k8s.PolicySet, idx *k8s.Index) []report.PolicyRow {
+	rows := make([]report.PolicyRow, 0, len(ps.Policies))
+	for _, p := range ps.Policies {
+		if p.Gateway {
+			var sels []string
+			for _, s := range p.Selectors {
+				sels = append(sels, k8s.SelectorString(s.MatchLabels))
+			}
+			rows = append(rows, report.PolicyRow{
+				Kind: p.Kind, Name: p.Name, Namespace: p.Namespace,
+				Selector: "[" + strings.Join(sels, " | ") + "] → " + p.EgressIP,
+				Source:   "egress-gateway",
+			})
+			continue
+		}
+		pods := 0
+		for _, w := range idx.Workloads() {
+			if p.Kind == "CiliumNetworkPolicy" && p.Namespace != w.Namespace {
+				continue
+			}
+			if p.Selector.Matches(w.PodLabels) {
+				pods++
+			}
+		}
+		source := "live"
+		if p.Owned {
+			source = "pipeline"
+		}
+		rows = append(rows, report.PolicyRow{
+			Kind: p.Kind, Name: p.Name, Namespace: p.Namespace,
+			Selector: k8s.SelectorString(p.Selector.MatchLabels),
+			Pods:     pods, Constrains: p.ConstrainsEgress(), Source: source,
+		})
+	}
+	return rows
+}
+
 func cmdReport(args []string) error {
 	fs := flag.NewFlagSet("report", flag.ExitOnError)
 	load := registerEnv(fs)
@@ -142,6 +191,7 @@ func cmdReport(args []string) error {
 	coverage := fs.Bool("coverage", false, "print the coverage line only")
 	showPol := fs.Bool("show-policy-inventory", false, "print the live policy inventory")
 	shadow := fs.Bool("shadow", true, "suggest policies in shadow mode")
+	ack := fs.String("ack-pre-policed", "", "acknowledge a foreign policy that constrains nothing (same meaning as plan)")
 	_ = fs.Parse(args)
 	if !*all && *ns == "" && !*coverage && !*showPol {
 		return fmt.Errorf("choose --all, --ns, --coverage or --show-policy-inventory")
@@ -162,6 +212,7 @@ func cmdReport(args []string) error {
 		PodCIDR:       mustPrefix(e.podCIDR),
 		SvcCIDR:       mustPrefix(e.svcCIDR),
 		PrivateCIDRs:  policy.DefaultPrivateCIDRs(),
+		AckPrePoliced: *ack,
 		GeneratedFrom: "egressctl report " + time.Now().UTC().Format(time.RFC3339),
 	}
 	nsFilter := *ns
@@ -230,12 +281,16 @@ func cmdReport(args []string) error {
 			Window:   in.window,
 			Exporter: "hubble-dynamic",
 		},
-		Workloads:  in.workloads,
-		Exemptions: in.exemptions,
-		Coverage:   cov,
+		Workloads:       in.workloads,
+		Exemptions:      in.exemptions,
+		Coverage:        cov,
+		PolicyInventory: in.policyRows,
 	}
 
 	if *format == "json" || *format == "csv" {
+		if err := os.MkdirAll(*out, 0o755); err != nil {
+			return err
+		}
 		f, err := os.Create(filepath.Join(*out, "egress-report."+*format))
 		if err != nil {
 			return err

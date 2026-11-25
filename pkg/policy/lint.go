@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/snbuback/kasil-egress/pkg/model"
 )
 
 // Issue is one lint finding.
@@ -20,6 +22,20 @@ type Issue struct {
 
 func (i Issue) String() string { return fmt.Sprintf("%s: %s: %s", i.File, i.Severity, i.Message) }
 
+// LintTarget is one live workload paired with the ceiling imposed on it by
+// policies this pipeline did not generate. Resolution is by the policy's
+// endpointSelector (a generated policy is built from the workload's selector)
+// with the deterministic object name from RuleName as a fallback: trimming the
+// "-egress" suffix is not enough, because RuleName appends the workload kind
+// for Job/CronJob/Pod ("renovate-cronjob-egress").
+type LintTarget struct {
+	Namespace  string
+	Kind       string
+	Name       string
+	Selector   map[string]string
+	Constraint *Constraint
+}
+
 // LintOptions configures the checks that need cluster knowledge.
 type LintOptions struct {
 	PodCIDR         netip.Prefix
@@ -27,9 +43,34 @@ type LintOptions struct {
 	AllowWorldBroad bool
 	AllowPatterns   bool
 	AckPrePoliced   string
-	// Constraints maps a workload key ("ns/name", derived from the policy
-	// name minus "-egress") to the ceiling imposed by pre-existing policies.
-	Constraints map[string]*Constraint
+	// Targets are the live workloads and their foreign-policy ceilings. A nil
+	// slice means "not asked" (offline lint, --live=false); an empty non-nil
+	// slice means the cluster was read and has no workloads.
+	Targets []LintTarget
+}
+
+// constraintFor resolves the ceiling for a parsed policy. matched is false
+// when the live inventory was read and no workload matches, which makes the
+// never-widen check unevaluated rather than silently passing.
+func (o LintOptions) constraintFor(doc cnpDoc) (c *Constraint, matched bool) {
+	if o.Targets == nil {
+		return nil, false
+	}
+	want := canonicalSelector(doc.Spec.EndpointSelector.MatchLabels)
+	for _, t := range o.Targets {
+		if t.Namespace == doc.Metadata.Namespace && canonicalSelector(t.Selector) == want {
+			return t.Constraint, true
+		}
+	}
+	for _, t := range o.Targets {
+		if t.Namespace != doc.Metadata.Namespace {
+			continue
+		}
+		if RuleName(model.Workload{Namespace: t.Namespace, Kind: t.Kind, Name: t.Name}) == doc.Metadata.Name {
+			return t.Constraint, true
+		}
+	}
+	return nil, false
 }
 
 // LintFiles lints every *.yaml under dir (recursively).
@@ -147,11 +188,13 @@ func lintDoc(file string, doc cnpDoc, opts LintOptions) []Issue {
 		}
 	}
 
-	// Never-widen: the file may only contain peers that a policy which already
-	// constrains this workload permits.
-	workloadKey := strings.TrimSuffix(doc.Metadata.Name, "-egress")
-	if opts.Constraints != nil && opts.AckPrePoliced == "" {
-		if c, ok := opts.Constraints[doc.Metadata.Namespace+"/"+workloadKey]; ok && c.Active() {
+	// Never-widen: the file may only contain peers that the foreign policies
+	// selecting this workload permit. An owned policy is never a ceiling, so
+	// a committed shadow policy cannot block its own regeneration.
+	if opts.AckPrePoliced == "" {
+		c, matched := opts.constraintFor(doc)
+		switch {
+		case matched && c != nil && c.Active():
 			for _, r := range doc.Spec.Egress {
 				for _, rule := range rulesFromYAML(r, doc.Spec.EndpointSelector.MatchLabels) {
 					if !c.AllowsAll(rule) {
@@ -161,6 +204,10 @@ func lintDoc(file string, doc cnpDoc, opts LintOptions) []Issue {
 					}
 				}
 			}
+		case !matched && opts.Targets != nil:
+			out = append(out, add("warning",
+				"no live workload matches endpointSelector %q or the name %q — never-widen check not evaluated (stale file?)",
+				canonicalSelector(doc.Spec.EndpointSelector.MatchLabels), doc.Metadata.Name)...)
 		}
 	}
 	return out

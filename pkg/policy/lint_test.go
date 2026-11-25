@@ -179,8 +179,13 @@ spec:
               protocol: TCP
 `
 	opts := lintOpts()
-	constraint := NewConstraint([]k8s.Policy{viaVPNIsolation()})
-	opts.Constraints = map[string]*Constraint{"apps/untrusted": constraint}
+	opts.Targets = []LintTarget{{
+		Namespace:  "apps",
+		Kind:       "Deployment",
+		Name:       "untrusted",
+		Selector:   map[string]string{"app": "untrusted"},
+		Constraint: NewConstraint([]k8s.Policy{viaVPNIsolation()}),
+	}}
 
 	issues := issuesFor(t, body, opts)
 	if !hasIssue(issues, "outside what CiliumClusterwideNetworkPolicy/via-vpn-isolation already allows") {
@@ -191,6 +196,91 @@ spec:
 	issues = issuesFor(t, body, opts)
 	if hasIssue(issues, "outside what") {
 		t.Errorf("never-widen rule still fired with an acknowledgement: %v", issues)
+	}
+}
+
+// A generated policy for a CronJob is named "<name>-cronjob-egress" (RuleName
+// appends the kind for Job/CronJob/Pod), so resolving the constraint by
+// trimming "-egress" would look up the wrong workload and silently skip the
+// never-widen check. Resolution must work through the endpointSelector.
+func TestLintNeverWidenCronJob(t *testing.T) {
+	body := `apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: renovate-cronjob-egress
+  namespace: renovate
+spec:
+  endpointSelector:
+    matchLabels:
+      app: renovate
+  enableDefaultDeny:
+    egress: true
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: nanomq
+            app.kubernetes.io/name: nanomq
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+`
+	opts := lintOpts()
+	opts.Targets = []LintTarget{{
+		Namespace:  "renovate",
+		Kind:       "CronJob",
+		Name:       "renovate",
+		Selector:   map[string]string{"app": "renovate"},
+		Constraint: NewConstraint([]k8s.Policy{viaVPNIsolation()}),
+	}}
+
+	issues := issuesFor(t, body, opts)
+	if !hasIssue(issues, "outside what CiliumClusterwideNetworkPolicy/via-vpn-isolation already allows") {
+		t.Fatalf("never-widen rule did not fire for a CronJob policy: %v", issues)
+	}
+
+	opts.AckPrePoliced = "CiliumClusterwideNetworkPolicy/via-vpn-isolation"
+	if issues = issuesFor(t, body, opts); hasIssue(issues, "outside what") {
+		t.Errorf("never-widen rule still fired with an acknowledgement: %v", issues)
+	}
+}
+
+// A policy file whose selector matches no live workload must not pass silently
+// in live mode: the never-widen check cannot be evaluated.
+func TestLintUnmatchedSelectorWarns(t *testing.T) {
+	opts := lintOpts()
+	opts.Targets = []LintTarget{}
+	issues := issuesFor(t, goodPolicy, opts)
+	if !hasIssue(issues, "never-widen check not evaluated") {
+		t.Fatalf("expected a warning for an unmatched selector, got %v", issues)
+	}
+	for _, i := range issues {
+		if i.Severity == "error" {
+			t.Errorf("unexpected error: %s", i)
+		}
+	}
+}
+
+// The pipeline's own inactive policy is not a constraint: linting a
+// regenerated file must not fail because a shadow copy is applied.
+func TestLintIgnoresOwnedPolicy(t *testing.T) {
+	owned := viaVPNIsolation()
+	owned.Owned = true
+	no := false
+	owned.EnableDefaultDenyEgress = &no
+	opts := lintOpts()
+	opts.Targets = []LintTarget{{
+		Namespace:  "apps",
+		Kind:       "Deployment",
+		Name:       "untrusted",
+		Selector:   map[string]string{"app": "untrusted"},
+		Constraint: NewConstraint([]k8s.Policy{owned}),
+	}}
+	issues := issuesFor(t, strings.Replace(goodPolicy, "frigate", "untrusted", -1), opts)
+	for _, i := range issues {
+		if i.Severity == "error" && strings.Contains(i.Message, "outside what") {
+			t.Errorf("owned policy was treated as a constraint: %v", issues)
+		}
 	}
 }
 

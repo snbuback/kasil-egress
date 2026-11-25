@@ -14,22 +14,30 @@ import (
 // that is already constrained the generated policy can only add allowed
 // peers. Treating the existing policies as a ceiling is what keeps this tool
 // from re-opening exactly the access an isolation policy exists to deny.
+//
+// Objects this pipeline owns (the chart's baseline and exemption CCNPs, and
+// every `<workload>-egress` CNP it generated) are not part of the ceiling:
+// they are the tool's own output and are replaced wholesale on the next
+// plan. Excluding them is what lets `report` produce an allowlist and `diff`
+// stay gap-free after a generated policy has been committed in shadow mode.
 type Constraint struct {
 	// Active policies switch the endpoint to egress default-deny, so their
 	// allowed set is the ceiling.
 	policies []k8s.Policy
-	// selectingButInactive are policies that select the workload without
-	// constraining egress. Their presence means a generated default-deny
-	// policy would change the effective policy in a way this tool cannot
-	// reason about, so generation is refused.
+	// selectingButInactive are foreign policies that select the workload
+	// without constraining egress. Their presence means a generated
+	// default-deny policy would change the effective policy in a way this
+	// tool cannot reason about, so generation is refused until a human
+	// acknowledges the policy by name.
 	selectingButInactive []k8s.Policy
 }
 
 // NewConstraint builds the ceiling from the policies that select a workload.
+// Pipeline-owned objects are skipped: see the type comment.
 func NewConstraint(selecting []k8s.Policy) *Constraint {
 	c := &Constraint{}
 	for _, p := range selecting {
-		if p.Gateway {
+		if p.Gateway || p.Owned {
 			continue
 		}
 		if p.ConstrainsEgress() {
@@ -44,11 +52,57 @@ func NewConstraint(selecting []k8s.Policy) *Constraint {
 // Active reports whether any selecting policy actually constrains egress.
 func (c *Constraint) Active() bool { return c != nil && len(c.policies) > 0 }
 
-// SkipGeneration reports whether a human must decide: a policy selects the
-// workload but does not constrain egress, so combining it with a generated
-// default-deny policy has effects that are not mechanically checkable.
+// SkipGeneration reports whether a human must decide: a foreign policy
+// selects the workload but does not constrain egress, so combining it with a
+// generated default-deny policy has effects that are not mechanically
+// checkable.
 func (c *Constraint) SkipGeneration() bool {
 	return c != nil && len(c.policies) == 0 && len(c.selectingButInactive) > 0
+}
+
+// Acknowledged reports whether ack names every selecting-but-inactive policy
+// that is blocking generation. The flag is a reviewed decision, so an
+// acknowledgement that names only some of the policies still blocks: each
+// one has to appear in the diff a human approved.
+func (c *Constraint) Acknowledged(ack string) bool {
+	if c == nil || len(c.selectingButInactive) == 0 {
+		return false
+	}
+	want := make(map[string]struct{}, len(c.selectingButInactive))
+	for _, p := range c.selectingButInactive {
+		want[p.Ref()] = struct{}{}
+	}
+	for _, part := range strings.Split(ack, ",") {
+		delete(want, strings.TrimSpace(part))
+	}
+	return len(want) == 0
+}
+
+// AcknowledgedActive reports whether ack names at least one policy that
+// constrains egress. Only that acknowledgement lifts the rule filter: an ack
+// for some other policy must not silently widen an active ceiling.
+func (c *Constraint) AcknowledgedActive(ack string) bool {
+	if c == nil || ack == "" {
+		return false
+	}
+	named := make(map[string]struct{})
+	for _, part := range strings.Split(ack, ",") {
+		named[strings.TrimSpace(part)] = struct{}{}
+	}
+	for _, p := range c.policies {
+		if _, ok := named[p.Ref()]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// BlocksGeneration reports whether generation must be replaced by a
+// PRE-POLICED placeholder: a foreign policy selects the workload but
+// constrains nothing, and the acknowledgement does not cover it. This is the
+// single gate used by report, plan and diff.
+func (c *Constraint) BlocksGeneration(ack string) bool {
+	return c.SkipGeneration() && !c.Acknowledged(ack)
 }
 
 // Refs returns "Kind/name" for every pre-existing selecting policy.
@@ -66,9 +120,11 @@ func (c *Constraint) Refs() []string {
 	return out
 }
 
-// Allows reports whether the union of the constraining policies permits a
-// generated rule and port. A generated rule outside the ceiling is traffic the
-// existing policy was already denying; it is never emitted.
+// Allows reports whether the union of the remaining (foreign, constraining)
+// policies permits a generated rule and port. Cilium policy is additive, so a
+// rule inside the union does not widen the endpoint's allowed set — the union
+// is the ceiling — while a rule outside it is traffic the existing policy was
+// already denying and is never emitted.
 func (c *Constraint) Allows(r Rule, p Port) bool {
 	if !c.Active() {
 		return true

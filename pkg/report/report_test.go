@@ -36,8 +36,9 @@ func fixture() Input {
 		Cluster:     Cluster{Name: "kasil", PodCIDR: "172.16.0.0/16", SvcCIDR: "172.30.0.0/16", Window: "2026-11-24 → 2026-12-08"},
 		Workloads: []Workload{{
 			Workload:  w,
-			Replicas:  1,
-			Nodes:     []string{"kube2.kasil.cloud"},
+			Replicas:  2,
+			Nodes:     []string{"kube2.kasil.cloud", "kube3.kasil.cloud"},
+			Images:    []string{"ghcr.io/blakeblackshear/frigate:0.18.3"},
 			Edges:     edges,
 			Candidate: c,
 			Flags:     ComputeFlags(w, edges, nil),
@@ -56,7 +57,9 @@ func TestMarkdown(t *testing.T) {
 	for _, want := range []string{
 		"## namespace: frigate",
 		"### Deployment/frigate",
-		"replicas 1",
+		"replicas 2",
+		"node kube2.kasil.cloud,kube3.kasil.cloud",
+		"image ghcr.io/blakeblackshear/frigate:0.18.3",
 		"| destination | kind | port/proto | conns |",
 		"nanomq/StatefulSet/nanomq",
 		"192.168.31.10/32",
@@ -64,6 +67,9 @@ func TestMarkdown(t *testing.T) {
 		"fan-out: 3 peers",
 		"suggested policy (review, not applied)",
 		"name: frigate-egress",
+		// The suggestion is shadow: a Phase 1 report must never hand over an
+		// enforcing policy.
+		"enableDefaultDeny:\n    egress: false",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("markdown missing %q\n%s", want, got)

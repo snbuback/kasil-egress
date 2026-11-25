@@ -69,7 +69,16 @@ type Index struct {
 	pods     map[string]podInfo  // "ns/name" -> pod
 	byUID    map[string]string   // uid -> "ns/name"
 	workload map[string]Workload // "ns/kind/name"
+	meta     map[string]WorkloadMeta
 	fetched  time.Time
+}
+
+// WorkloadMeta is the per-workload fact sheet the report header prints: how
+// many pods exist, where they run and which images they use.
+type WorkloadMeta struct {
+	Replicas int
+	Nodes    []string
+	Images   []string
 }
 
 type podInfo struct {
@@ -78,6 +87,7 @@ type podInfo struct {
 	UID       string
 	Node      string
 	Labels    map[string]string
+	Images    []string
 	Owners    []ownerRef
 }
 
@@ -98,7 +108,13 @@ type objectMeta struct {
 
 // NewIndex creates an empty index bound to a client.
 func NewIndex(c *Client) *Index {
-	return &Index{client: c, pods: map[string]podInfo{}, byUID: map[string]string{}, workload: map[string]Workload{}}
+	return &Index{
+		client:   c,
+		pods:     map[string]podInfo{},
+		byUID:    map[string]string{},
+		workload: map[string]Workload{},
+		meta:     map[string]WorkloadMeta{},
+	}
 }
 
 // FetchedAt reports when the last successful refresh happened.
@@ -117,7 +133,13 @@ func (i *Index) Refresh(ctx context.Context) error {
 	type rawPod struct {
 		Metadata objectMeta `json:"metadata"`
 		Spec     struct {
-			NodeName string `json:"nodeName"`
+			NodeName   string `json:"nodeName"`
+			Containers []struct {
+				Image string `json:"image"`
+			} `json:"containers"`
+			InitContainers []struct {
+				Image string `json:"image"`
+			} `json:"initContainers"`
 		} `json:"spec"`
 	}
 	pods := make(map[string]podInfo, len(podItems))
@@ -128,12 +150,24 @@ func (i *Index) Refresh(ctx context.Context) error {
 			return fmt.Errorf("decode pod: %w", err)
 		}
 		key := p.Metadata.Namespace + "/" + p.Metadata.Name
+		var images []string
+		for _, c := range p.Spec.Containers {
+			if c.Image != "" {
+				images = append(images, c.Image)
+			}
+		}
+		for _, c := range p.Spec.InitContainers {
+			if c.Image != "" {
+				images = append(images, c.Image)
+			}
+		}
 		pods[key] = podInfo{
 			Namespace: p.Metadata.Namespace,
 			Name:      p.Metadata.Name,
 			UID:       p.Metadata.UID,
 			Node:      p.Spec.NodeName,
 			Labels:    p.Metadata.Labels,
+			Images:    images,
 			Owners:    p.Metadata.OwnerReferences,
 		}
 		if p.Metadata.UID != "" {
@@ -152,6 +186,7 @@ func (i *Index) Refresh(ctx context.Context) error {
 			var o struct {
 				Metadata objectMeta `json:"metadata"`
 				Spec     struct {
+					Replicas *int32 `json:"replicas"`
 					Selector *struct {
 						MatchLabels map[string]string `json:"matchLabels"`
 					} `json:"selector"`
@@ -171,6 +206,9 @@ func (i *Index) Refresh(ctx context.Context) error {
 				return fmt.Errorf("decode %s: %w", kind, err)
 			}
 			oo := ownerObject{Kind: kind, Name: o.Metadata.Name, Namespace: o.Metadata.Namespace, Labels: o.Metadata.Labels}
+			if o.Spec.Replicas != nil {
+				oo.Replicas = int(*o.Spec.Replicas)
+			}
 			if o.Spec.Selector != nil {
 				oo.SpecSelector = o.Spec.Selector.MatchLabels
 			}
@@ -199,10 +237,27 @@ func (i *Index) Refresh(ctx context.Context) error {
 	}
 
 	wl := map[string]Workload{}
+	nodes := map[string]map[string]struct{}{}
+	images := map[string]map[string]struct{}{}
+	meta := map[string]WorkloadMeta{}
 	for key, p := range pods {
 		w := resolve(p, owners)
 		w.Node = p.Node
 		wl[key] = w
+		wk := w.Key()
+		meta[wk] = WorkloadMeta{Replicas: meta[wk].Replicas + 1}
+		if p.Node != "" {
+			if nodes[wk] == nil {
+				nodes[wk] = map[string]struct{}{}
+			}
+			nodes[wk][p.Node] = struct{}{}
+		}
+		for _, img := range p.Images {
+			if images[wk] == nil {
+				images[wk] = map[string]struct{}{}
+			}
+			images[wk][img] = struct{}{}
+		}
 	}
 	// Also index the templates themselves, so a workload with no running pod
 	// (a suspended CronJob, a scaled-to-zero Deployment) can still be
@@ -217,13 +272,29 @@ func (i *Index) Refresh(ctx context.Context) error {
 				continue
 			}
 		}
-		wl[k] = workloadOf(o)
+		w := workloadOf(o)
+		wl[k] = w
+		if m := meta[w.Key()]; m.Replicas == 0 && o.Replicas > 0 {
+			meta[w.Key()] = WorkloadMeta{Replicas: o.Replicas}
+		}
+	}
+	for key, m := range meta {
+		for node := range nodes[key] {
+			m.Nodes = append(m.Nodes, node)
+		}
+		sort.Strings(m.Nodes)
+		for img := range images[key] {
+			m.Images = append(m.Images, img)
+		}
+		sort.Strings(m.Images)
+		meta[key] = m
 	}
 
 	i.mu.Lock()
 	i.pods = pods
 	i.byUID = byUID
 	i.workload = wl
+	i.meta = meta
 	i.fetched = time.Now()
 	i.mu.Unlock()
 	return nil
@@ -236,6 +307,7 @@ type ownerObject struct {
 	Labels         map[string]string
 	SpecSelector   map[string]string
 	TemplateLabels map[string]string
+	Replicas       int
 	Owners         []ownerRef
 }
 
@@ -373,6 +445,18 @@ func (i *Index) PodNode(namespace, pod string) string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.pods[namespace+"/"+pod].Node
+}
+
+// Meta returns the report-header facts for a workload: live pod count, the
+// nodes those pods run on and their images. A workload known only from the
+// database (its pods are gone) returns the zero value.
+func (i *Index) Meta(w Workload) WorkloadMeta {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	m := i.meta[w.Key()]
+	m.Nodes = append([]string(nil), m.Nodes...)
+	m.Images = append([]string(nil), m.Images...)
+	return m
 }
 
 // SelectorString renders a selector deterministically (for logs and reports).

@@ -30,6 +30,13 @@ peers that policy already allows, and everything else is printed as
 re-open the isolation. Review the diff and, if the widening is genuinely
 intended, use `--ack-pre-policed <kind>/<name>`.
 
+The baseline and exemption CCNPs shipped by the chart, and every policy this
+pipeline generated, carry `egress.kasil.io/owned: "true"`. They are never
+treated as constraints and never raise `PRE-POLICED`: the pipeline replaces its
+own output on the next `plan`, so a committed shadow policy must not block its
+regeneration or make `diff` report a gap. Do not strip the marker when copying
+a policy file.
+
 ## 2. Commit and lint
 
 ```sh

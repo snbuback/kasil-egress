@@ -123,6 +123,7 @@ func TestRenderGolden(t *testing.T) {
 		"app.kubernetes.io/instance: frigate",
 		"toCIDR:\n        - 192.168.31.10/32",
 		"toFQDNs:\n        - matchName: api.telegram.org",
+		"egress.kasil.io/owned: \"true\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered policy missing %q\n%s", want, got)
@@ -225,6 +226,14 @@ func TestNeverWidenDropsInClusterPeers(t *testing.T) {
 	if !strings.Contains(string(out), "egress.kasil.io/ack-pre-policed") {
 		t.Errorf("acknowledgement annotation missing:\n%s", out)
 	}
+
+	// An acknowledgement that names some other policy must not widen the
+	// ceiling: the filter stays on.
+	wrong := opts
+	wrong.AckPrePoliced = "CiliumClusterwideNetworkPolicy/somebody-elses"
+	if c3 := Build(w, edges, wrong); len(c3.Rules) != 2 {
+		t.Errorf("an acknowledgement for an unrelated policy lifted the filter: %d rules, want 2", len(c3.Rules))
+	}
 }
 
 func TestConstraintInactiveSkipsGeneration(t *testing.T) {
@@ -239,6 +248,116 @@ func TestConstraintInactiveSkipsGeneration(t *testing.T) {
 	}
 	if !c.SkipGeneration() {
 		t.Fatal("SkipGeneration must be set when a selecting policy constrains nothing")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// baselinePolicy mirrors the chart's baseline-dns-apiserver: it selects every
+// pod, denies nothing, and is created by this pipeline.
+func baselinePolicy() k8s.Policy {
+	return k8s.Policy{
+		Kind:     "CiliumClusterwideNetworkPolicy",
+		Name:     "baseline-dns-apiserver",
+		Selector: k8s.Selector{},
+		Owned:    true,
+		Egress: []k8s.EgressRule{{
+			ToEntities: []string{"kube-apiserver"},
+			ToPorts:    []k8s.ToPort{{Ports: []k8s.Port{{Port: "443", Protocol: "TCP"}}}},
+		}},
+		EnableDefaultDenyEgress: boolPtr(false),
+	}
+}
+
+// The baseline selects every pod, so treating it as a foreign inactive policy
+// would mark every workload PRE-POLICED with no rules: report would emit no
+// allowlist, plan nothing, and diff (the flip-to-enforce gate) would never
+// pass. Pipeline-owned objects are excluded from the constraint instead.
+func TestOwnedPoliciesAreNotConstraints(t *testing.T) {
+	base := baselinePolicy()
+	c := NewConstraint([]k8s.Policy{base})
+	if c.Active() {
+		t.Fatal("baseline with enableDefaultDeny.egress=false must not be active")
+	}
+	if c.SkipGeneration() || c.BlocksGeneration("") {
+		t.Fatal("owned baseline must not block generation")
+	}
+	if refs := c.Refs(); len(refs) != 0 {
+		t.Errorf("owned baseline reported as a pre-existing policy: %v", refs)
+	}
+
+	// A committed shadow policy for the workload itself is also owned: it
+	// must not block regeneration or turn diff into a permanent gap.
+	shadow := k8s.Policy{
+		Kind:      "CiliumNetworkPolicy",
+		Namespace: "frigate",
+		Name:      "frigate-egress",
+		Selector:  k8s.Selector{MatchLabels: map[string]string{"app.kubernetes.io/name": "frigate"}},
+		Owned:     true,
+		Egress: []k8s.EgressRule{{
+			ToCIDR:  []string{"192.168.31.10/32"},
+			ToPorts: []k8s.ToPort{{Ports: []k8s.Port{{Port: "554", Protocol: "TCP"}}}},
+		}},
+		EnableDefaultDenyEgress: boolPtr(false),
+	}
+	c = NewConstraint([]k8s.Policy{base, shadow})
+	if c.BlocksGeneration("") {
+		t.Fatal("a committed shadow policy blocked its own regeneration")
+	}
+
+	opts := baseOpts()
+	opts.Constraint = c
+	cand := Build(testWorkload(), []model.Edge{
+		edge(1, model.KindFQDN, "api.telegram.org", 443, "TCP"),
+		edge(2, model.KindCIDR, "192.168.31.10/32", 554, "TCP"),
+	}, opts)
+	if len(cand.Rules) != 2 {
+		t.Fatalf("rules = %d, want 2 with only owned policies present: %+v", len(cand.Rules), cand.Rules)
+	}
+	for _, s := range cand.Skipped {
+		if s.Reason == "pre-policed-skip" {
+			t.Fatalf("owned policy produced a pre-policed skip: %+v", cand.Skipped)
+		}
+	}
+	if len(cand.PrePoliced) != 0 {
+		t.Errorf("PrePoliced = %v, want empty", cand.PrePoliced)
+	}
+}
+
+// A genuinely foreign policy that constrains nothing still blocks generation,
+// and the acknowledgement only lifts the skip when it names the policy.
+func TestAckLiftsForeignInactiveSkip(t *testing.T) {
+	foreign := viaVPNIsolation()
+	foreign.EnableDefaultDenyEgress = boolPtr(false)
+	const ref = "CiliumClusterwideNetworkPolicy/via-vpn-isolation"
+
+	c := NewConstraint([]k8s.Policy{foreign})
+	if !c.SkipGeneration() || !c.BlocksGeneration("") {
+		t.Fatal("foreign inactive policy must block generation")
+	}
+	if c.Acknowledged("") {
+		t.Error("an empty acknowledgement must not count")
+	}
+	if c.Acknowledged("CiliumClusterwideNetworkPolicy/something-else") {
+		t.Error("an acknowledgement for a different policy must not count")
+	}
+	if !c.Acknowledged(ref) {
+		t.Fatalf("acknowledging %s did not lift the skip", ref)
+	}
+	if c.BlocksGeneration(ref) {
+		t.Error("BlocksGeneration must be false once the foreign policy is acknowledged")
+	}
+
+	// The acknowledged path still generates the observed rules.
+	opts := baseOpts()
+	opts.Constraint = c
+	opts.AckPrePoliced = ref
+	cand := Build(testWorkload(), []model.Edge{edge(1, model.KindFQDN, "api.telegram.org", 443, "TCP")}, opts)
+	if len(cand.Rules) != 1 {
+		t.Fatalf("rules = %d, want 1 after acknowledgement: %+v", len(cand.Rules), cand.Rules)
+	}
+	if len(cand.PrePoliced) != 1 || cand.PrePoliced[0] != ref {
+		t.Errorf("PrePoliced = %v, want [%s]", cand.PrePoliced, ref)
 	}
 }
 

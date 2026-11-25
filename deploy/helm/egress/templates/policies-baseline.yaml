@@ -15,6 +15,9 @@ kind: CiliumClusterwideNetworkPolicy
 metadata:
   name: baseline-dns-apiserver
   labels:
+    # Marks the object as this pipeline's own output: egressctl never treats
+    # it as a foreign constraint (see k8s.OwnedKey).
+    egress.kasil.io/owned: "true"
     {{- include "egress.labels" . | nindent 4 }}
 spec:
   description: >-
@@ -57,6 +60,8 @@ kind: CiliumClusterwideNetworkPolicy
 metadata:
   name: allow-all-{{ . }}
   labels:
+    # Pipeline-owned no-op: reported, never treated as a foreign constraint.
+    egress.kasil.io/owned: "true"
     {{- include "egress.labels" $ | nindent 4 }}
 spec:
   description: "documented exemption: {{ . }} is not egress-policed in v1"
