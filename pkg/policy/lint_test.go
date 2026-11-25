@@ -154,10 +154,9 @@ func TestLintCatches(t *testing.T) {
 	}
 }
 
-func TestLintNeverWiden(t *testing.T) {
-	// A file that adds an in-cluster peer to a workload already isolated by
-	// via-vpn-isolation must fail unless acknowledged.
-	body := `apiVersion: cilium.io/v2
+// untrustedBody is a generated policy that adds an in-cluster peer to a
+// workload isolated by via-vpn-isolation.
+const untrustedBody = `apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: untrusted-egress
@@ -178,6 +177,11 @@ spec:
             - port: "1883"
               protocol: TCP
 `
+
+func TestLintNeverWiden(t *testing.T) {
+	// A file that adds an in-cluster peer to a workload already isolated by
+	// via-vpn-isolation must fail unless acknowledged.
+	body := untrustedBody
 	opts := lintOpts()
 	opts.Targets = []LintTarget{{
 		Namespace:  "apps",
@@ -261,13 +265,15 @@ func TestLintUnmatchedSelectorWarns(t *testing.T) {
 	}
 }
 
-// The pipeline's own inactive policy is not a constraint: linting a
-// regenerated file must not fail because a shadow copy is applied.
+// The pipeline's own policy is not a constraint: linting a regenerated file
+// must not fail because the previous generation (shadow or enforced) is
+// applied in the cluster.
 func TestLintIgnoresOwnedPolicy(t *testing.T) {
+	// An *enforced* pipeline-owned policy would be an active ceiling if it
+	// leaked into the constraint; the in-cluster peer in the file would then
+	// be flagged as widening. Owned objects are excluded, so it must not.
 	owned := viaVPNIsolation()
 	owned.Owned = true
-	no := false
-	owned.EnableDefaultDenyEgress = &no
 	opts := lintOpts()
 	opts.Targets = []LintTarget{{
 		Namespace:  "apps",
@@ -276,7 +282,7 @@ func TestLintIgnoresOwnedPolicy(t *testing.T) {
 		Selector:   map[string]string{"app": "untrusted"},
 		Constraint: NewConstraint([]k8s.Policy{owned}),
 	}}
-	issues := issuesFor(t, strings.Replace(goodPolicy, "frigate", "untrusted", -1), opts)
+	issues := issuesFor(t, untrustedBody, opts)
 	for _, i := range issues {
 		if i.Severity == "error" && strings.Contains(i.Message, "outside what") {
 			t.Errorf("owned policy was treated as a constraint: %v", issues)
