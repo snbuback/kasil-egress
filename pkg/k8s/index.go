@@ -31,6 +31,10 @@ type Workload struct {
 	// Labels are the workload object's own labels.
 	Labels map[string]string
 	Node   string
+	// HostNetwork is true when the workload's pods run in the node network
+	// namespace: those pods are not Cilium endpoints and no pod policy can
+	// select them (design §10.8).
+	HostNetwork bool
 }
 
 // Key returns "namespace/kind/name", the stable identity used in egress.edge.
@@ -39,13 +43,21 @@ func (w Workload) Key() string { return w.Namespace + "/" + w.Kind + "/" + w.Nam
 // Model converts the API view into the storage/policy view.
 func (w Workload) Model() model.Workload {
 	return model.Workload{
-		Namespace: w.Namespace,
-		Kind:      w.Kind,
-		Name:      w.Name,
-		Selector:  w.Selector,
-		PodLabels: w.PodLabels,
-		Labels:    w.Labels,
+		Namespace:   w.Namespace,
+		Kind:        w.Kind,
+		Name:        w.Name,
+		Selector:    w.Selector,
+		PodLabels:   w.PodLabels,
+		Labels:      w.Labels,
+		HostNetwork: w.HostNetwork,
 	}
+}
+
+// isRunning is the S1 "running workload" test. An empty phase is counted as
+// running: it is what the API returns for a pod whose phase has not been
+// written yet, and undercounting capture coverage is worse than the opposite.
+func isRunning(phase string) bool {
+	return phase == "" || phase == "Running"
 }
 
 var volatileLabels = map[string]struct{}{
@@ -74,21 +86,27 @@ type Index struct {
 }
 
 // WorkloadMeta is the per-workload fact sheet the report header prints: how
-// many pods exist, where they run and which images they use.
+// many pods exist, how many of those are running (the S1 "running workload"
+// test), where they run and which images they use.
 type WorkloadMeta struct {
 	Replicas int
-	Nodes    []string
-	Images   []string
+	Running  int
+	// HostNetwork is true when any of the workload's pods runs hostNetwork.
+	HostNetwork bool
+	Nodes       []string
+	Images      []string
 }
 
 type podInfo struct {
-	Namespace string
-	Name      string
-	UID       string
-	Node      string
-	Labels    map[string]string
-	Images    []string
-	Owners    []ownerRef
+	Namespace   string
+	Name        string
+	UID         string
+	Node        string
+	HostNetwork bool
+	Phase       string
+	Labels      map[string]string
+	Images      []string
+	Owners      []ownerRef
 }
 
 type ownerRef struct {
@@ -133,14 +151,18 @@ func (i *Index) Refresh(ctx context.Context) error {
 	type rawPod struct {
 		Metadata objectMeta `json:"metadata"`
 		Spec     struct {
-			NodeName   string `json:"nodeName"`
-			Containers []struct {
+			NodeName    string `json:"nodeName"`
+			HostNetwork bool   `json:"hostNetwork"`
+			Containers  []struct {
 				Image string `json:"image"`
 			} `json:"containers"`
 			InitContainers []struct {
 				Image string `json:"image"`
 			} `json:"initContainers"`
 		} `json:"spec"`
+		Status struct {
+			Phase string `json:"phase"`
+		} `json:"status"`
 	}
 	pods := make(map[string]podInfo, len(podItems))
 	byUID := make(map[string]string, len(podItems))
@@ -161,14 +183,17 @@ func (i *Index) Refresh(ctx context.Context) error {
 				images = append(images, c.Image)
 			}
 		}
+		phase := p.Status.Phase
 		pods[key] = podInfo{
-			Namespace: p.Metadata.Namespace,
-			Name:      p.Metadata.Name,
-			UID:       p.Metadata.UID,
-			Node:      p.Spec.NodeName,
-			Labels:    p.Metadata.Labels,
-			Images:    images,
-			Owners:    p.Metadata.OwnerReferences,
+			Namespace:   p.Metadata.Namespace,
+			Name:        p.Metadata.Name,
+			UID:         p.Metadata.UID,
+			Node:        p.Spec.NodeName,
+			HostNetwork: p.Spec.HostNetwork,
+			Phase:       phase,
+			Labels:      p.Metadata.Labels,
+			Images:      images,
+			Owners:      p.Metadata.OwnerReferences,
 		}
 		if p.Metadata.UID != "" {
 			byUID[p.Metadata.UID] = key
@@ -243,9 +268,18 @@ func (i *Index) Refresh(ctx context.Context) error {
 	for key, p := range pods {
 		w := resolve(p, owners)
 		w.Node = p.Node
+		w.HostNetwork = p.HostNetwork
 		wl[key] = w
 		wk := w.Key()
-		meta[wk] = WorkloadMeta{Replicas: meta[wk].Replicas + 1}
+		m := meta[wk]
+		m.Replicas++
+		if isRunning(p.Phase) {
+			m.Running++
+		}
+		if p.HostNetwork {
+			m.HostNetwork = true
+		}
+		meta[wk] = m
 		if p.Node != "" {
 			if nodes[wk] == nil {
 				nodes[wk] = map[string]struct{}{}
@@ -273,9 +307,13 @@ func (i *Index) Refresh(ctx context.Context) error {
 			}
 		}
 		w := workloadOf(o)
+		if meta[w.Key()].HostNetwork {
+			w.HostNetwork = true
+		}
 		wl[k] = w
 		if m := meta[w.Key()]; m.Replicas == 0 && o.Replicas > 0 {
-			meta[w.Key()] = WorkloadMeta{Replicas: o.Replicas}
+			m.Replicas = o.Replicas
+			meta[w.Key()] = m
 		}
 	}
 	for key, m := range meta {

@@ -62,7 +62,26 @@ jobs:
             [ -z "$bad" ] || { echo "objects without a name in $f: $bad"; exit 1; }
           done
       - name: render the collector disabled
-        run: helm template egress deploy/helm/egress --namespace egress $HELM_API_VERSIONS --set collector.enabled=false | grep -q 'kind: DaemonSet' && exit 1 || true
+        run: |
+          set -euo pipefail
+          if helm template egress deploy/helm/egress --namespace egress $HELM_API_VERSIONS --set collector.enabled=false | grep -q 'kind: DaemonSet'; then
+            echo "collector.enabled=false still rendered a DaemonSet"
+            exit 1
+          fi
+      - name: render a committed policy (the Phase 2 delivery path)
+        run: |
+          set -euo pipefail
+          # Regression: templates/policies-generated.yaml must glob the
+          # directory policies are actually committed to (files/policies/).
+          # It once globbed policies/, so every committed allowlist rendered
+          # nothing and ArgoCD applied nothing - and the object-count check
+          # above still passed. A fixture is the only way to catch that.
+          tmp="$(mktemp -d)"
+          cp -r deploy/helm/egress "$tmp/chart"
+          mkdir -p "$tmp/chart/files/policies/ci"
+          cp ci/fixtures/fixture-policy.yaml "$tmp/chart/files/policies/ci/ci-fixture-egress.yaml"
+          helm template egress "$tmp/chart" --namespace egress $HELM_API_VERSIONS > /tmp/with-policy.yaml
+          grep -q 'name: ci-fixture-egress' /tmp/with-policy.yaml
 
   policies:
     name: policies / lint generated files

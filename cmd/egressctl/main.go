@@ -57,6 +57,9 @@ func run(args []string) error {
 	case "audit-guard":
 		return cmdAuditGuard(rest)
 	case "version", "--version", "-v":
+		if err := noPositional(rest); err != nil {
+			return err
+		}
 		fmt.Println(version)
 		return nil
 	case "help", "--help", "-h":

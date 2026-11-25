@@ -40,11 +40,12 @@ func cmdAuditGuard(args []string) error {
 		return err
 	}
 	ctx := context.Background()
-	db, client, err := e.open(ctx)
+	// audit-guard reads one ConfigMap and writes another: it must keep
+	// working when Postgres is down, which is exactly when the guard matters.
+	client, err := e.kubeClient()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
 
 	cm, found, err := getConfigMap(ctx, client, "kube-system", "cilium-config")
 	if err != nil {

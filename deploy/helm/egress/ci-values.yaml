@@ -20,3 +20,6 @@ monitoring:
       app.kubernetes.io/instance: victoria
 digest:
   webhookSecretName: egress-webhook
+  webhookExternalSecret:
+    enabled: true
+    remoteRefKey: ci/egress-webhook

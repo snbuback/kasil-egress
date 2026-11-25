@@ -31,12 +31,13 @@ func fixture() Input {
 		SvcCIDR:      netip.MustParsePrefix("172.30.0.0/16"),
 		PrivateCIDRs: policy.DefaultPrivateCIDRs(),
 	})
-	return Input{
+	in := Input{
 		GeneratedAt: time.Date(2026, 12, 8, 10, 0, 0, 0, time.UTC),
 		Cluster:     Cluster{Name: "kasil", PodCIDR: "172.16.0.0/16", SvcCIDR: "172.30.0.0/16", Window: "2026-11-24 → 2026-12-08"},
 		Workloads: []Workload{{
 			Workload:  w,
 			Replicas:  2,
+			Running:   2,
 			Nodes:     []string{"kube2.kasil.cloud", "kube3.kasil.cloud"},
 			Images:    []string{"ghcr.io/blakeblackshear/frigate:0.18.3"},
 			Edges:     edges,
@@ -44,8 +45,9 @@ func fixture() Input {
 			Flags:     ComputeFlags(w, edges, nil),
 		}},
 		Exemptions: []Exemption{{Subject: "kube-system", Reason: "control plane"}},
-		Coverage:   Coverage{Workloads: 1, WithRules: 1, WithExemptions: 1, Percent: 100},
 	}
+	in.Coverage = ComputeCoverage(in.Workloads)
+	return in
 }
 
 func TestMarkdown(t *testing.T) {
@@ -87,6 +89,19 @@ func TestMarkdownEmptyNamespace(t *testing.T) {
 	}
 }
 
+func TestMarkdownExemptWorkload(t *testing.T) {
+	in := fixture()
+	in.Workloads[0].Exempt = "hostNetwork pod: not a Cilium endpoint"
+	in.Workloads[0].Flags = append(in.Workloads[0].Flags, "EXEMPT")
+	var sb strings.Builder
+	if err := Markdown(&sb, in, "frigate"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sb.String(), "**exempt:** hostNetwork pod") {
+		t.Errorf("markdown does not carry the exemption reason:\n%s", sb.String())
+	}
+}
+
 func TestSummary(t *testing.T) {
 	var sb strings.Builder
 	if err := Summary(&sb, fixture()); err != nil {
@@ -96,7 +111,8 @@ func TestSummary(t *testing.T) {
 	for _, want := range []string{
 		"# Egress audit — summary",
 		"workloads audited: 1",
-		"coverage: 100.0%",
+		"coverage (candidate or exemption, §9.4): 100.0%",
+		"coverage (>= 7 days of edges, S1): 100.0%",
 		"| frigate | 1 | 3 |",
 		"| kube-system | control plane |",
 	} {
@@ -185,6 +201,60 @@ func TestComputeFlags(t *testing.T) {
 	flags = ComputeFlags(model.Workload{Namespace: "x", Kind: "Pod", Name: "z"}, nil, nil)
 	if !contains(flags, "UNLABELED") || !contains(flags, "NO-EDGES") {
 		t.Errorf("flags = %v, want UNLABELED and NO-EDGES", flags)
+	}
+}
+
+func TestCoverageRequiresRunningWorkload(t *testing.T) {
+	w := model.Workload{Namespace: "x", Kind: "Deployment", Name: "scaled-to-zero"}
+	cov := ComputeCoverage([]Workload{{Workload: w, Replicas: 3, Running: 0}})
+	if cov.Workloads != 0 || cov.NotRunning != 1 {
+		t.Fatalf("coverage = %+v, want the scaled-to-zero workload outside the denominator", cov)
+	}
+}
+
+func TestCoverageZeroEdgesIsNotCovered(t *testing.T) {
+	w := model.Workload{Namespace: "x", Kind: "Deployment", Name: "silent"}
+	cov := ComputeCoverage([]Workload{{Workload: w, Running: 1}})
+	if cov.Workloads != 1 || cov.WithoutEdges != 1 {
+		t.Fatalf("coverage = %+v, want one uncovered workload", cov)
+	}
+	if cov.Percent != 0 || cov.SevenDayPercent != 0 {
+		t.Fatalf("coverage = %+v, a zero-edge workload must not count as covered", cov)
+	}
+}
+
+func TestCoverageExcludesExemptNamespaces(t *testing.T) {
+	w := model.Workload{Namespace: "kube-system", Kind: "Deployment", Name: "coredns"}
+	cov := ComputeCoverage([]Workload{{Workload: w, Running: 2, NamespaceExempt: true}})
+	if cov.Workloads != 0 || cov.NamespaceExemptWorkloads != 1 {
+		t.Fatalf("coverage = %+v, want the exempt namespace outside the denominator", cov)
+	}
+}
+
+func TestCoverageExemptionCountsAsCovered(t *testing.T) {
+	w := model.Workload{Namespace: "victoria", Kind: "Deployment", Name: "vmagent"}
+	cov := ComputeCoverage([]Workload{{Workload: w, Running: 1, Exempt: "scrape fan-out"}})
+	if cov.WithExemptions != 1 || cov.Percent != 100 {
+		t.Fatalf("coverage = %+v, want the documented exemption counted", cov)
+	}
+	if cov.With7Days != 0 || cov.SevenDayPercent != 0 {
+		t.Fatalf("coverage = %+v: an exemption is not captured traffic", cov)
+	}
+}
+
+func TestCoverageSevenDayGate(t *testing.T) {
+	w := model.Workload{Namespace: "x", Kind: "Deployment", Name: "young"}
+	now := time.Now()
+	cand := policy.Candidate{Rules: []policy.Rule{{Kind: policy.RuleFQDN, Value: "api.example.com"}}}
+	young := []model.Edge{{FirstSeen: now.Add(-3 * 24 * time.Hour), LastSeen: now}}
+	cov := ComputeCoverage([]Workload{{Workload: w, Running: 1, Edges: young, Candidate: cand}})
+	if cov.Percent != 100 || cov.SevenDayPercent != 0 || cov.With7Days != 0 {
+		t.Fatalf("coverage = %+v, want 3 days of edges to fail the S1 gate only", cov)
+	}
+	mature := []model.Edge{{FirstSeen: now.Add(-8 * 24 * time.Hour), LastSeen: now}}
+	cov = ComputeCoverage([]Workload{{Workload: w, Running: 1, Edges: mature, Candidate: cand}})
+	if cov.With7Days != 1 || cov.SevenDayPercent != 100 {
+		t.Fatalf("coverage = %+v, want 8 days of edges to pass S1", cov)
 	}
 }
 

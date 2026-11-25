@@ -62,6 +62,10 @@ type Candidate struct {
 	// EgressGateway lists CiliumEgressGatewayPolicy objects selecting it.
 	EgressGateway []string
 	Flags         []string
+	// Exemption is set when the workload is documented as exempt (§10.4).
+	// Nothing is generated for it: report shows the traffic and the reason,
+	// plan/diff skip it, lint warns if a policy file targets it.
+	Exemption *Exemption
 }
 
 // Options configures generation.
@@ -82,6 +86,10 @@ type Options struct {
 	// AckPrePoliced records an explicit human acknowledgement that the
 	// generated policy widens the existing one.
 	AckPrePoliced string
+	// Exemptions is the documented exemption set (§10.4). Generate returns a
+	// rules-less candidate carrying the reason for an exempt workload, so
+	// report, plan and diff never disagree about which workloads are exempt.
+	Exemptions *Exemptions
 	// GeneratedFrom is stamped into an annotation.
 	GeneratedFrom string
 }
@@ -231,12 +239,16 @@ func Build(w model.Workload, edges []model.Edge, opts Options) Candidate {
 	return c
 }
 
-// Generate applies the pre-policed gate to Build. When a foreign policy
-// selects the workload without constraining egress and the acknowledgement
-// does not cover it, the result is a rules-less PRE-POLICED placeholder: the
-// report, plan and diff all go through this one call, so they agree on when a
-// human decision is required.
+// Generate applies the documented exemptions and the pre-policed gate to
+// Build. When a foreign policy selects the workload without constraining
+// egress and the acknowledgement does not cover it, the result is a
+// rules-less PRE-POLICED placeholder: the report, plan and diff all go
+// through this one call, so they agree on when a human decision is required.
+// An exempt workload returns a rules-less candidate that carries the reason.
 func Generate(w model.Workload, edges []model.Edge, opts Options) Candidate {
+	if ex, ok := opts.Exemptions.Match(w); ok {
+		return Candidate{Workload: w, Exemption: &ex, Flags: []string{"EXEMPT"}}
+	}
 	if opts.Constraint != nil && opts.Constraint.BlocksGeneration(opts.AckPrePoliced) {
 		c := Candidate{Workload: w, PrePoliced: opts.Constraint.Refs()}
 		c.Skipped = append(c.Skipped, Skipped{Reason: "pre-policed-skip"})

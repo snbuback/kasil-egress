@@ -101,12 +101,23 @@ maintenance:
 
 digest:
   enabled: true
-  schedule: "0 7 * * 1"     # Mondays 07:00 cluster time
+  schedule: "0 7 * * 1"     # Mondays 07:00 cluster time unless timeZone is set
+  # IANA timezone for the schedule (Kubernetes >= 1.27). Empty = cluster time.
+  timeZone: ""
   # Discord-compatible webhook. Leave empty to skip the POST (the digest is
   # still written to the log).
   webhookURL: ""
   webhookSecretName: ""
   webhookSecretKey: url
+  # Or let the chart create the webhook Secret from a secret store, so the URL
+  # is configured in Git (the reference) and lives in Bitwarden (the value).
+  webhookExternalSecret:
+    enabled: false
+    refreshInterval: 1h
+    secretStoreRef:
+      name: bitwarden-secrets
+      kind: ClusterSecretStore
+    remoteRefKey: ""
   sinceHours: 168
   resources:
     requests:

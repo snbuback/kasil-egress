@@ -34,6 +34,9 @@ type LintTarget struct {
 	Name       string
 	Selector   map[string]string
 	Constraint *Constraint
+	// Exempt is the documented reason the workload must not have a generated
+	// policy (§10.4). A file that targets one is flagged.
+	Exempt string
 }
 
 // LintOptions configures the checks that need cluster knowledge.
@@ -49,17 +52,19 @@ type LintOptions struct {
 	Targets []LintTarget
 }
 
-// constraintFor resolves the ceiling for a parsed policy. matched is false
-// when the live inventory was read and no workload matches, which makes the
-// never-widen check unevaluated rather than silently passing.
-func (o LintOptions) constraintFor(doc cnpDoc) (c *Constraint, matched bool) {
+// constraintFor resolves the target for a parsed policy: its ceiling, whether
+// a live workload matched, and whether that workload is a documented
+// exemption. matched is false when the live inventory was read and nothing
+// matches, which makes the never-widen check unevaluated rather than silently
+// passing.
+func (o LintOptions) constraintFor(doc cnpDoc) (c *Constraint, matched bool, exempt string) {
 	if o.Targets == nil {
-		return nil, false
+		return nil, false, ""
 	}
 	want := canonicalSelector(doc.Spec.EndpointSelector.MatchLabels)
 	for _, t := range o.Targets {
 		if t.Namespace == doc.Metadata.Namespace && canonicalSelector(t.Selector) == want {
-			return t.Constraint, true
+			return t.Constraint, true, t.Exempt
 		}
 	}
 	for _, t := range o.Targets {
@@ -67,10 +72,10 @@ func (o LintOptions) constraintFor(doc cnpDoc) (c *Constraint, matched bool) {
 			continue
 		}
 		if RuleName(model.Workload{Namespace: t.Namespace, Kind: t.Kind, Name: t.Name}) == doc.Metadata.Name {
-			return t.Constraint, true
+			return t.Constraint, true, t.Exempt
 		}
 	}
-	return nil, false
+	return nil, false, ""
 }
 
 // LintFiles lints every *.yaml under dir (recursively).
@@ -194,7 +199,12 @@ func lintDoc(file string, doc cnpDoc, opts LintOptions) []Issue {
 	// acknowledgement is scoped to the file whose ceiling it names: acking
 	// via-vpn-isolation must not silence the check for a policy whose ceiling
 	// is something else, which is what a plain "is the flag set" test did.
-	c, matched := opts.constraintFor(doc)
+	c, matched, exempt := opts.constraintFor(doc)
+	if matched && exempt != "" {
+		out = append(out, add("warning",
+			"targets %q, a documented exemption (%s): the generator never emits a policy for it — delete the file or re-justify the exemption",
+			canonicalSelector(doc.Spec.EndpointSelector.MatchLabels), exempt)...)
+	}
 	switch {
 	case matched && c != nil && c.Active() && !c.AcknowledgedActive(opts.AckPrePoliced):
 		for _, r := range doc.Spec.Egress {

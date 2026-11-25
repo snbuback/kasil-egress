@@ -21,7 +21,7 @@ What they do:
 
 | Workflow | Trigger | Runs |
 |---|---|---|
-| `ci.yaml` | PR, push to `main` | `gofmt` check, `go vet`, `go test`, a linux/arm64 cross-build, `helm lint` and two renders (default + all features), and `egressctl lint` over any committed policy files |
+| `ci.yaml` | PR, push to `main` | `gofmt` check, `go vet`, `go test`, a linux/arm64 cross-build, `helm lint` and two renders (default + all features), a render with a fixture policy committed under `files/policies/` (proves the delivery path), and `egressctl lint` over any committed policy files |
 | `release.yaml` | tag `v*` | multi-arch (amd64+arm64) images for `egressd` and `egressctl` to `ghcr.io/snbuback/kasil-egress/<binary>`, and the chart to `oci://ghcr.io/snbuback/charts` |
 
 The first `v*` tag also makes the images public, because the packages inherit

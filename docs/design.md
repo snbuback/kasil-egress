@@ -909,7 +909,7 @@ Every ring follows: **generate → shadow → soak → enforce → verify**.
 | `homeassistant-hass`, `music-assistant-server` (**hostNetwork**) | **not policed** by v1; documented in the report as a gap | they are not Cilium endpoints; pod policies cannot select them (§10.8) |
 | `victoria/vmagent` (**the scraper**) | exempt from a generated policy in v1 | its egress is the cluster-wide scrape fan-out by design (every ServiceMonitor target, node-exporter and kubelet): it is excluded from `audit-agg` (§7.1), so there is no inventory to generate from, and "allowlist the scraper" degenerates into allow-all anyway. The rest of `victoria` (grafana, vmalert, vmsingle, kube-state-metrics, operators) is audited and policed normally |
 
-Exemptions are *files in Git* with a comment explaining why, not tribal knowledge.
+Exemptions are *files in Git* with a comment explaining why, not tribal knowledge. In this implementation the set lives in `pkg/policy/exemptions.go` and is consumed by `report`, `plan`, `diff` and `lint`, so the document cannot drift from the generator.
 
 ### 10.5 Failure modes to design against
 

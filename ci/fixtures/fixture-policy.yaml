@@ -1,0 +1,25 @@
+# Fixture for the chart's render check: proves a policy committed under
+# files/policies/ is actually rendered by templates/policies-generated.yaml
+# (the Phase 2 delivery path). CI copies it into a throwaway chart; it is
+# never applied to a cluster.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ci-fixture-egress
+  namespace: ci-fixture
+  annotations:
+    egress.kasil.io/owned: "true"
+spec:
+  endpointSelector:
+    matchLabels:
+      app: ci-fixture
+  enableDefaultDeny:
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP

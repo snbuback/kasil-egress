@@ -63,10 +63,18 @@ func cmdPlan(args []string) error {
 	}
 
 	var (
-		emitted, skipped int
-		problems         []string
+		emitted, skipped, exempt int
+		problems                 []string
 	)
 	for _, c := range in.candidates {
+		if c.Exemption != nil {
+			// Documented exemption (§10.4): no policy is generated, by
+			// design. Printed so the reason is in the run log, not tribal
+			// knowledge.
+			exempt++
+			fmt.Fprintf(os.Stderr, "exempt %s: %s\n", short(c.Workload), c.Exemption.Reason)
+			continue
+		}
 		opts := opts
 		opts.GeneratedFrom = "egressctl plan"
 		if c.Empty() {
@@ -79,6 +87,14 @@ func cmdPlan(args []string) error {
 				}
 			}
 			problems = append(problems, fmt.Sprintf("%s: %s", short(c.Workload), reason))
+			continue
+		}
+		if len(c.Workload.Selector) == 0 {
+			// Rendering this would emit endpointSelector: {} — a
+			// namespace-wide default-deny. Refuse instead of writing a
+			// policy whose scope is not what the file name says.
+			skipped++
+			problems = append(problems, fmt.Sprintf("%s: no stable pod labels, so a workload-scoped endpointSelector cannot be built — add labels or document an exemption", short(c.Workload)))
 			continue
 		}
 		body, err := policy.Render(c, opts)
@@ -102,7 +118,7 @@ func cmdPlan(args []string) error {
 			}
 		}
 	}
-	fmt.Fprintf(os.Stderr, "\nplanned %d policies, skipped %d workloads\n", emitted, skipped)
+	fmt.Fprintf(os.Stderr, "\nplanned %d policies, skipped %d workloads, exempt %d\n", emitted, skipped, exempt)
 	if len(problems) > 0 && *out != "" {
 		fmt.Fprintf(os.Stderr, "\nneeds a human decision:\n")
 		sort.Strings(problems)
@@ -163,6 +179,14 @@ func cmdDiff(args []string) error {
 
 	gaps := 0
 	for _, c := range in.candidates {
+		if c.Exemption != nil {
+			// Exempt by design: no policy exists to diff, and no edge is a
+			// gap. Printed (unless --quiet) so the why is in the output.
+			if !*quiet {
+				fmt.Printf("%-55s exempt (%s)\n", short(c.Workload), c.Exemption.Subject)
+			}
+			continue
+		}
 		var lines []string
 		for _, s := range c.Skipped {
 			switch s.Reason {
@@ -250,15 +274,20 @@ func cmdLint(args []string) error {
 		// for Job/CronJob/Pod the object name carries a kind suffix that
 		// trimming "-egress" cannot recover.
 		opts.Targets = make([]policy.LintTarget, 0, len(idx.Workloads()))
+		exemptions := policy.DefaultExemptions()
 		for _, w := range idx.Workloads() {
 			sel, _ := ps.Selecting(w)
-			opts.Targets = append(opts.Targets, policy.LintTarget{
+			t := policy.LintTarget{
 				Namespace:  w.Namespace,
 				Kind:       w.Kind,
 				Name:       w.Name,
 				Selector:   w.Selector,
 				Constraint: policy.NewConstraint(sel),
-			})
+			}
+			if ex, ok := exemptions.Match(w.Model()); ok && ex.Workload != "" {
+				t.Exempt = ex.Reason
+			}
+			opts.Targets = append(opts.Targets, t)
 		}
 	}
 

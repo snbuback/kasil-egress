@@ -31,6 +31,64 @@ kubectl -n kube-system exec ds/cilium -- sh -c 'tail -1 /var/run/cilium/hubble/a
 If `dns-raw` has port-53 records but no `l7.dns` block, DNS is not going
 through the proxy: the baseline CCNP is missing (step 1.2a in the design).
 
+### 1.1 kube3 memory gate (measure before Hubble lands there)
+
+`#354` turns Hubble and the three dynamic exporters on for **every** node in
+one merge. kube3 is the tight node (~1.3 GiB free, per design §7.1/§13), and
+the card is explicit: nothing may be enabled on kube3 before its memory use is
+measured. Record the baseline **before** the PR merges and paste it into the PR
+description; re-measure after the sync.
+
+```sh
+# Pre-merge baseline (kube3).
+kubectl top node kube3.kasil.cloud
+kubectl describe node kube3.kasil.cloud | sed -n '/Allocated resources/,/Events/p'
+kubectl -n kube-system top pod -l k8s-app=cilium \
+  --field-selector spec.nodeName=kube3.kasil.cloud --containers
+kubectl get --raw /api/v1/nodes/kube3.kasil.cloud/proxy/stats/summary \
+  | jq '.node.memory.availableBytes/1048576'
+
+# Post-rollout: the same four commands, once ArgoCD reports cilium Synced and
+# the cilium pods on kube3 are Running (the dynamic-exporter ring buffer is
+# what grows).
+```
+
+Pass criteria (design §7.1, budget 40–80 MiB per node):
+
+- the `cilium-agent` RSS on kube3 grows by **no more than ~80 MiB**;
+- `node.memory.availableBytes` on kube3 stays above **256 MiB**;
+- no memory pressure or eviction appears within 24 h:
+
+```sh
+kubectl get events -A --field-selector reason=Evicted --since=24h
+kubectl get node kube3.kasil.cloud \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
+```
+
+If the gate fails, lower `fileMaxSizeMb` for the exporters from 8 to 4 in
+`apps/cilium/values.yaml` (halves the per-file buffer), re-sync and re-measure.
+If it still fails, `hubble.enabled=false` is the rollback — a node under memory
+pressure is worse than a blind audit window.
+
+### 1.2 Confirm the weekly digest is delivered
+
+The digest is the review loop's inbox item (§11.4), so a digest that only
+exists in a completed Job's log does not count. The chart renders the webhook
+as an `ExternalSecret` from the same Bitwarden item the Alertmanager uses
+(`victoria.discord_webhook`), and posts to Discord.
+
+```sh
+kubectl -n egress get externalsecret egress-digest-webhook   # SecretSynced=True
+kubectl -n egress get secret egress-digest-webhook
+kubectl -n egress create job --from=cronjob/egress-digest egress-digest-manual
+kubectl -n egress logs job/egress-digest-manual | tail -40
+# want: the markdown digest, no "webhook returned" error, and the message in
+# the Discord channel within a minute.
+```
+
+The CronJob runs Mondays 07:00 **Europe/Dublin** (`digest.timeZone`); a cluster
+in UTC would otherwise fire it at 08:00 local in winter.
+
 ## 2. Check the collector
 
 ```sh
@@ -81,6 +139,19 @@ egressctl report --show-policy-inventory         # the pre-existing objects, liv
 Acceptance (§9.4): S1 and S2 met; every workload has an allowlist candidate or
 an explicit exemption; zero ingestion errors over 48 h; the report is
 committed so Phase 2 diffs against a frozen baseline.
+
+`--coverage` prints two percentages over **running** workloads outside the
+exempt namespaces (a scaled-to-zero Deployment or a suspended CronJob is
+audited but not counted):
+
+- `coverage` — §9.4: generated candidate **or** documented exemption;
+- `seven_day` — S1: at least 7 days of observed edges (the actual gate,
+  `seven_day >= 95.0`).
+
+Read them together: an exemption covers a workload in the §9.4 sense without
+proving that its traffic was captured, which is exactly the gap S1 measures.
+`not_running` and `exempt_namespace` are printed too, so a denominator that
+shrinks because indexing broke is visible rather than flattering.
 
 ## 5. Watch for these symptoms
 

@@ -386,6 +386,32 @@ func TestLintAckDoesNotSilenceOtherFiles(t *testing.T) {
 	}
 }
 
+// A committed policy that targets a documented exemption is a contradiction:
+// the generator never emits one, so the file would silently exempt-by-policy
+// something the design says must not be policed. Live lint warns (an error
+// would block a legitimate emergency policy).
+func TestLintWarnsOnExemptTarget(t *testing.T) {
+	body := strings.Replace(goodPolicy, "namespace: frigate", "namespace: victoria", 1)
+	body = strings.Replace(body, "app.kubernetes.io/name: frigate", "app.kubernetes.io/name: vmagent", 1)
+	opts := lintOpts()
+	opts.Targets = []LintTarget{{
+		Namespace: "victoria",
+		Kind:      "Deployment",
+		Name:      "vmagent",
+		Selector:  map[string]string{"app.kubernetes.io/name": "vmagent"},
+		Exempt:    "cluster-wide scrape fan-out by design",
+	}}
+	issues := issuesFor(t, body, opts)
+	if !hasIssue(issues, "documented exemption") {
+		t.Fatalf("expected the exemption warning, got %v", issues)
+	}
+	for _, i := range issues {
+		if i.Severity == "error" {
+			t.Errorf("unexpected error: %s", i)
+		}
+	}
+}
+
 func TestLintDuplicateSelectors(t *testing.T) {
 	dir := t.TempDir()
 	writePolicy(t, dir, "a.yaml", goodPolicy)

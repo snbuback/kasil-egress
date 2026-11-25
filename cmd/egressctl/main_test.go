@@ -159,4 +159,7 @@ func TestUnexpectedPositional(t *testing.T) {
 	if err := cmdDiff([]string{"extra"}); err == nil || !strings.Contains(err.Error(), "unexpected argument") {
 		t.Fatalf("stray argument was accepted: %v", err)
 	}
+	if err := run([]string{"version", "extra"}); err == nil || !strings.Contains(err.Error(), "unexpected argument") {
+		t.Fatalf("version accepted a stray argument: %v", err)
+	}
 }

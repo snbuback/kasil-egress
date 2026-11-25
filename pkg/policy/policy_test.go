@@ -493,6 +493,56 @@ func TestPrePolicedDroppedKeepsDestAndPort(t *testing.T) {
 	}
 }
 
+// The documented exemptions (§10.4) are enforced by the generator, not only
+// listed by the report: plan must never emit a default-deny policy for the
+// CNI/DNS control plane, the storage control plane, the scraper or a
+// hostNetwork workload — and must not exempt all of victoria or homeassistant.
+func TestExemptionsSkipGeneration(t *testing.T) {
+	edges := []model.Edge{edge(1, model.KindFQDN, "api.example.com", 443, "TCP")}
+	cases := []struct {
+		name string
+		w    model.Workload
+		want bool
+	}{
+		{"cni control plane", model.Workload{Namespace: "kube-system", Kind: "DaemonSet", Name: "cilium", Selector: map[string]string{"k8s-app": "cilium"}}, true},
+		{"storage control plane", model.Workload{Namespace: "piraeus-datastore", Kind: "DaemonSet", Name: "linstor-csi", Selector: map[string]string{"app": "linstor-csi"}}, true},
+		{"scraper", model.Workload{Namespace: "victoria", Kind: "Deployment", Name: "vmagent", Selector: map[string]string{"app": "vmagent"}}, true},
+		{"hostNetwork workload by name", model.Workload{Namespace: "homeassistant", Kind: "Deployment", Name: "homeassistant-hass", Selector: map[string]string{"app": "hass"}}, true},
+		{"hostNetwork workload by fact", model.Workload{Namespace: "other", Kind: "Pod", Name: "sniffer", Selector: map[string]string{"app": "x"}, HostNetwork: true}, true},
+		{"rest of victoria", model.Workload{Namespace: "victoria", Kind: "Deployment", Name: "grafana", Selector: map[string]string{"app": "grafana"}}, false},
+		{"homeassistant pod workload", model.Workload{Namespace: "homeassistant", Kind: "Deployment", Name: "eufy", Selector: map[string]string{"app": "eufy"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := baseOpts()
+			opts.Exemptions = DefaultExemptions()
+			c := Generate(tc.w, edges, opts)
+			if got := c.Exemption != nil; got != tc.want {
+				t.Fatalf("exempt=%v, want %v (candidate %+v)", got, tc.want, c)
+			}
+			if !tc.want {
+				if len(c.Rules) == 0 {
+					t.Fatalf("policed workload generated no rules: %+v", c)
+				}
+				return
+			}
+			if len(c.Rules) != 0 {
+				t.Errorf("exempt workload generated %d rules", len(c.Rules))
+			}
+			if c.Exemption.Reason == "" {
+				t.Errorf("exemption carries no reason: %+v", c.Exemption)
+			}
+		})
+	}
+}
+
+func TestExemptionsNilMatchesNothing(t *testing.T) {
+	var ex *Exemptions
+	if _, ok := ex.Match(model.Workload{Namespace: "kube-system", Name: "cilium"}); ok {
+		t.Fatal("a nil exemption set must not exempt anything")
+	}
+}
+
 func TestRuleName(t *testing.T) {
 	tests := []struct {
 		w    model.Workload

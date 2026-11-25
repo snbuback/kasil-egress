@@ -20,8 +20,11 @@ egressctl plan --ns <namespace> --out /tmp/plan
 
 `plan` emits one file per workload. Read the exit summary: workloads listed
 under "needs a human decision" have no rules — usually a peer that could not be
-resolved, or a public IP with no DNS name (`world-unnamed`), which the
-generator deliberately refuses to guess.
+resolved, a public IP with no DNS name (`world-unnamed`), which the generator
+deliberately refuses to guess, or a workload with no stable pod labels (the
+generator refuses to write `endpointSelector: {}`, which would be a
+namespace-wide default-deny). Documented exemptions are printed as
+`exempt <ns>/<kind>/<name>: <reason>` and produce no file at all.
 
 If a workload is `PRE-POLICED` (selected by a policy this pipeline did not
 generate, today only `via-vpn-isolation`), the generated policy only contains
@@ -122,8 +125,26 @@ kubectl -n kube-system exec ds/cilium -- cilium-dbg endpoint get <endpoint-id> -
 
 ## Exemptions (files with a reason, not tribal knowledge)
 
-`kube-system`, `piraeus-datastore` and `victoria/vmagent` are exempt in the
-chart (`policies.exemptions`). `homeassistant-hass` and
-`music-assistant-server` run hostNetwork and cannot be selected by a pod
-policy: an accepted v1 gap, reported by `egressctl report` every time so it
-stays visible.
+The exemption set lives in `pkg/policy/exemptions.go` and is applied by
+`report`, `plan`, `diff` and `lint` alike:
+
+- by **namespace**: `kube-system`, `piraeus-datastore`;
+- by **workload**: `victoria/vmagent` (scrape fan-out) and the two hostNetwork
+  workloads `homeassistant/homeassistant-hass` and
+  `homeassistant/music-assistant-server` (they are not Cilium endpoints, so no
+  pod policy can select them — an accepted v1 gap).
+
+`plan` prints `exempt <ns>/<kind>/<name>: <reason>` and writes nothing; the
+report shows the same reasons in its exemption table and flags the workload
+`EXEMPT`.
+
+**Do not add `victoria` to `apps/egress/values.yaml` → `policies.exemptions`.**
+That key is the chart's *namespace* exemption: it renders an `allow-all`
+CCNP that selects the whole namespace and turns default-deny off for every
+pod in it — including grafana, vmalert and vmsingle, which design §10.4 says
+are audited and policed normally. Only the scraper is exempt, and that is the
+generator's job, not the chart's.
+
+`homeassistant-hass` and `music-assistant-server` run hostNetwork and cannot be
+selected by a pod policy: an accepted v1 gap, reported by `egressctl report`
+every time so it stays visible.

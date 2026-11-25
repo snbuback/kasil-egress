@@ -66,21 +66,96 @@ type Exemption struct {
 // Workload is one audited workload.
 type Workload struct {
 	model.Workload
-	Replicas  int
-	Nodes     []string
-	Images    []string
+	Replicas int
+	Nodes    []string
+	Images   []string
+	// Running is the number of live pods in status.phase Running. It is what
+	// "running workload" means for the S1 denominator: a scaled-to-zero
+	// Deployment or a suspended CronJob is audited but not counted.
+	Running int
+	// NamespaceExempt marks a workload whose whole namespace is a documented
+	// Phase 2 exemption (§10.4); those namespaces are excluded from coverage.
+	NamespaceExempt bool
+	// Exempt is the reason a single workload is documented as exempt
+	// (hostNetwork gap, scrape fan-out). Empty when the workload is policed.
+	Exempt    string
 	Candidate policy.Candidate
 	Edges     []model.Edge
 	Flags     []string
 }
 
-// Coverage summarises how much of the inventory produced an answer.
+// RequiredEdgeDays is S1's observation window: a running workload counts as
+// covered by capture only when its observed edges span at least this many
+// days.
+const RequiredEdgeDays = 7
+
+// Coverage summarises how much of the inventory produced an answer. Two
+// percentages are reported because the design uses two measures:
+//
+//   - Percent is §9.4: every running workload in a non-exempt namespace has a
+//     generated allowlist candidate or a documented exemption.
+//   - SevenDayPercent is S1 (§1): the same workloads have at least
+//     RequiredEdgeDays of observed edges.
 type Coverage struct {
-	Workloads      int
-	WithRules      int
-	WithExemptions int
-	WithoutEdges   int
-	Percent        float64
+	// Workloads is the S1 denominator: running workloads outside the
+	// documented exempt namespaces.
+	Workloads int
+	// NotRunning and NamespaceExemptWorkloads are counted, not hidden: a
+	// suspiciously small denominator must be visible.
+	NotRunning               int
+	NamespaceExemptWorkloads int
+	WithRules                int
+	WithExemptions           int
+	WithoutEdges             int
+	With7Days                int
+	Percent                  float64
+	SevenDayPercent          float64
+}
+
+// ComputeCoverage builds the Phase 1 coverage numbers. Workloads with no
+// running pod, and every workload in an exempt namespace, are outside the S1
+// denominator (§1: "running workloads ... excluding exempt namespaces").
+// Covered means a generated allowlist candidate or a documented exemption; a
+// zero-edge workload is neither, so it is not silently counted as covered.
+func ComputeCoverage(ws []Workload) Coverage {
+	var c Coverage
+	for _, w := range ws {
+		if w.NamespaceExempt {
+			c.NamespaceExemptWorkloads++
+			continue
+		}
+		if w.Running == 0 {
+			c.NotRunning++
+			continue
+		}
+		c.Workloads++
+		switch {
+		case len(w.Candidate.Rules) > 0:
+			c.WithRules++
+		case w.Exempt != "":
+			c.WithExemptions++
+		case len(w.Edges) == 0:
+			c.WithoutEdges++
+		}
+		if edgeSpan(w.Edges) >= RequiredEdgeDays*24*time.Hour {
+			c.With7Days++
+		}
+	}
+	if c.Workloads > 0 {
+		c.Percent = 100 * float64(c.WithRules+c.WithExemptions) / float64(c.Workloads)
+		c.SevenDayPercent = 100 * float64(c.With7Days) / float64(c.Workloads)
+	}
+	return c
+}
+
+// edgeSpan is the time between the first and the last observation across a
+// workload's edges.
+func edgeSpan(edges []model.Edge) time.Duration {
+	from, to := observed(edges)
+	if from.IsZero() || to.Before(from) {
+		return 0
+	}
+	return to.Sub(from)
 }
 
 // ComputeFlags derives the human-facing flags for a workload from its edges.
@@ -222,6 +297,9 @@ func Markdown(w io.Writer, in Input, namespace string) error {
 		if len(x.Flags) > 0 {
 			fmt.Fprintf(w, "\n**flags:** %s\n", strings.Join(x.Flags, ", "))
 		}
+		if x.Exempt != "" {
+			fmt.Fprintf(w, "\n**exempt:** %s\n", x.Exempt)
+		}
 		fmt.Fprintf(w, "\n| destination | kind | port/proto | conns | conns/day | first seen | last seen | hours | notes |\n")
 		fmt.Fprintf(w, "|---|---|---|---|---|---|---|---|---|\n")
 		for _, e := range x.Edges {
@@ -266,11 +344,15 @@ func Summary(w io.Writer, in Input) error {
 	if in.Cluster.Name != "" {
 		fmt.Fprintf(w, "- cluster: %s (pod CIDR %s, service CIDR %s)\n", in.Cluster.Name, in.Cluster.PodCIDR, in.Cluster.SvcCIDR)
 	}
-	fmt.Fprintf(w, "- workloads audited: %d\n", in.Coverage.Workloads)
+	fmt.Fprintf(w, "- workloads audited: %d (running, outside exempt namespaces)\n", in.Coverage.Workloads)
 	fmt.Fprintf(w, "- workloads with generated rules: %d\n", in.Coverage.WithRules)
+	fmt.Fprintf(w, "- workloads covered by a documented exemption: %d\n", in.Coverage.WithExemptions)
 	fmt.Fprintf(w, "- workloads without observed egress: %d\n", in.Coverage.WithoutEdges)
-	fmt.Fprintf(w, "- exemptions: %d\n", in.Coverage.WithExemptions)
-	fmt.Fprintf(w, "- coverage: %.1f%%\n\n", in.Coverage.Percent)
+	fmt.Fprintf(w, "- workloads with >= %d days of observed edges: %d\n", RequiredEdgeDays, in.Coverage.With7Days)
+	fmt.Fprintf(w, "- coverage (candidate or exemption, §9.4): %.1f%%\n", in.Coverage.Percent)
+	fmt.Fprintf(w, "- coverage (>= %d days of edges, S1): %.1f%%\n", RequiredEdgeDays, in.Coverage.SevenDayPercent)
+	fmt.Fprintf(w, "- not counted: %d workload(s) with no running pod, %d in exempt namespaces\n\n",
+		in.Coverage.NotRunning, in.Coverage.NamespaceExemptWorkloads)
 
 	fmt.Fprintf(w, "## namespace × destination-kind\n\n")
 	kinds := []string{model.KindWorkload, model.KindService, model.KindCIDR, model.KindFQDN, model.KindEntity}

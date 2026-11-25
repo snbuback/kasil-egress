@@ -63,6 +63,9 @@ metadata:
     app.kubernetes.io/component: digest
 spec:
   schedule: {{ .Values.digest.schedule | quote }}
+  {{- with .Values.digest.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 2

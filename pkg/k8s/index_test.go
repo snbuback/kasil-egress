@@ -11,7 +11,7 @@ import (
 
 func fakeAPI(t *testing.T) *httptest.Server {
 	t.Helper()
-	pod := func(ns, name, uid, node string, labels map[string]string, owners []ownerRef, images ...string) map[string]any {
+	pod := func(ns, name, uid, node string, labels map[string]string, owners []ownerRef, phase string, images ...string) map[string]any {
 		var containers []map[string]any
 		for _, img := range images {
 			containers = append(containers, map[string]any{"name": "c", "image": img})
@@ -21,7 +21,8 @@ func fakeAPI(t *testing.T) *httptest.Server {
 				"name": name, "namespace": ns, "uid": uid,
 				"labels": labels, "ownerReferences": owners,
 			},
-			"spec": map[string]any{"nodeName": node, "containers": containers},
+			"spec":   map[string]any{"nodeName": node, "containers": containers},
+			"status": map[string]any{"phase": phase},
 		}
 	}
 	rs := map[string]any{
@@ -64,28 +65,50 @@ func fakeAPI(t *testing.T) *httptest.Server {
 			"selector": map[string]any{"matchLabels": map[string]string{"app.kubernetes.io/name": "hermes"}},
 		},
 	}
+	// hostNetwork: the pod is not a Cilium endpoint, but the index still has
+	// to report it so the report can document the gap.
+	hassDeploy := map[string]any{
+		"metadata": map[string]any{"name": "homeassistant-hass", "namespace": "homeassistant", "labels": map[string]string{"app": "hass"}},
+		"spec": map[string]any{
+			"replicas": 1,
+			"selector": map[string]any{"matchLabels": map[string]string{"app": "hass"}},
+		},
+	}
+	hassPod := map[string]any{
+		"metadata": map[string]any{
+			"name": "homeassistant-hass-abc", "namespace": "homeassistant", "uid": "uid-6",
+			"labels":          map[string]string{"app": "hass"},
+			"ownerReferences": []ownerRef{{Kind: "Deployment", Name: "homeassistant-hass", Controller: true}},
+		},
+		"spec": map[string]any{
+			"nodeName": "kube4.kasil.cloud", "hostNetwork": true,
+			"containers": []map[string]any{{"name": "c", "image": "ghcr.io/home-assistant/home-assistant:2026.11"}},
+		},
+		"status": map[string]any{"phase": "Running"},
+	}
 
 	lists := map[string][]any{
 		"/api/v1/pods": {
 			pod("frigate", "frigate-7d9f8c6b5-abcde", "uid-1", "kube2.kasil.cloud",
 				map[string]string{"app": "frigate", "pod-template-hash": "7d9f8c6b5"},
 				[]ownerRef{{Kind: "ReplicaSet", Name: "frigate-7d9f8c6b5", Controller: true}},
-				"ghcr.io/blakeblackshear/frigate:0.18.3"),
+				"Running", "ghcr.io/blakeblackshear/frigate:0.18.3"),
 			pod("frigate", "frigate-7d9f8c6b5-fghij", "uid-5", "kube3.kasil.cloud",
 				map[string]string{"app": "frigate", "pod-template-hash": "7d9f8c6b5"},
 				[]ownerRef{{Kind: "ReplicaSet", Name: "frigate-7d9f8c6b5", Controller: true}},
-				"ghcr.io/blakeblackshear/frigate:0.18.3"),
+				"Running", "ghcr.io/blakeblackshear/frigate:0.18.3"),
 			pod("renovate", "renovate-29384756-x7k2p", "uid-2", "kube2.kasil.cloud",
 				map[string]string{"app": "renovate", "job-name": "renovate-29384756"},
 				[]ownerRef{{Kind: "Job", Name: "renovate-29384756", Controller: true}},
-				"ghcr.io/renovatebot/renovate:41.1.0"),
+				"Succeeded", "ghcr.io/renovatebot/renovate:41.1.0"),
 			pod("hermes", "hermes-0", "uid-3", "kube1.kasil.cloud",
 				map[string]string{"app.kubernetes.io/name": "hermes"},
 				[]ownerRef{{Kind: "StatefulSet", Name: "hermes", Controller: true}},
-				"ghcr.io/snbuback/hermes:1.2.3"),
-			pod("default", "debug-shell", "uid-4", "kube4.kasil.cloud", map[string]string{"run": "debug"}, nil, "busybox:1.36"),
+				"Running", "ghcr.io/snbuback/hermes:1.2.3"),
+			pod("default", "debug-shell", "uid-4", "kube4.kasil.cloud", map[string]string{"run": "debug"}, nil, "Running", "busybox:1.36"),
+			hassPod,
 		},
-		"/apis/apps/v1/deployments":  {deploy, idle},
+		"/apis/apps/v1/deployments":  {deploy, idle, hassDeploy},
 		"/apis/apps/v1/statefulsets": {sts},
 		"/apis/apps/v1/daemonsets":   {},
 		"/apis/apps/v1/replicasets":  {rs},
@@ -182,5 +205,23 @@ func TestIndexResolve(t *testing.T) {
 	// A workload known only from the database has no live facts.
 	if m := idx.Meta(Workload{Namespace: "gone", Kind: "Deployment", Name: "gone"}); m.Replicas != 0 || len(m.Nodes) != 0 {
 		t.Errorf("unknown workload meta = %+v, want zero value", m)
+	}
+
+	// "Running" is the S1 coverage denominator: the two frigate pods are
+	// Running, the completed renovate job pod is not.
+	if m := idx.Meta(Workload{Namespace: "frigate", Kind: "Deployment", Name: "frigate"}); m.Running != 2 {
+		t.Errorf("frigate running pods = %d, want 2", m.Running)
+	}
+	if m := idx.Meta(Workload{Namespace: "renovate", Kind: "CronJob", Name: "renovate"}); m.Running != 0 {
+		t.Errorf("completed CronJob running pods = %d, want 0", m.Running)
+	}
+	// A scaled-to-zero workload has no live pod, so it is not "running".
+	if m := idx.Meta(Workload{Namespace: "default", Kind: "Deployment", Name: "idle"}); m.Running != 0 {
+		t.Errorf("idle running pods = %d, want 0", m.Running)
+	}
+	// hostNetwork is carried through to the policy/report view.
+	w, ok := idx.Get("homeassistant", "Deployment", "homeassistant-hass")
+	if !ok || !w.HostNetwork || !w.Model().HostNetwork {
+		t.Errorf("hostNetwork workload = %+v (ok=%v), want HostNetwork on both views", w, ok)
 	}
 }

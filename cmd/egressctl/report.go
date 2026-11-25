@@ -17,17 +17,6 @@ import (
 	"github.com/snbuback/kasil-egress/pkg/report"
 )
 
-// defaultExemptions are the documented Phase 2 exemptions (§10.4). They are
-// reported every time so the gap stays visible rather than becoming tribal
-// knowledge.
-var defaultExemptions = []report.Exemption{
-	{Subject: "kube-system", Reason: "CNI/DNS/control plane; a mistake takes the cluster down and there is nothing to gain"},
-	{Subject: "piraeus-datastore", Reason: "LINSTOR/DRBD control plane; replication is kernel-level and unaffected by pod policy"},
-	{Subject: "victoria/vmagent", Reason: "cluster-wide scrape fan-out by design; excluded from capture, so there is no inventory to generate from"},
-	{Subject: "homeassistant-hass (hostNetwork)", Reason: "hostNetwork pod: not a Cilium endpoint, cannot be selected by a pod policy — accepted v1 gap"},
-	{Subject: "music-assistant-server (hostNetwork)", Reason: "hostNetwork pod: not a Cilium endpoint, cannot be selected by a pod policy — accepted v1 gap"},
-}
-
 // auditInput groups everything the report and plan commands need.
 type auditInput struct {
 	edges      []model.Edge
@@ -43,6 +32,9 @@ type auditInput struct {
 // collect reads the database and the cluster and joins them into per-workload
 // candidates.
 func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespace string, opts policy.Options) (*auditInput, error) {
+	if opts.Exemptions == nil {
+		opts.Exemptions = policy.DefaultExemptions()
+	}
 	idx := k8s.NewIndex(client)
 	if err := idx.Refresh(ctx); err != nil {
 		return nil, err
@@ -82,7 +74,10 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 		}
 	}
 
-	in := &auditInput{policySet: ps, index: idx, exemptions: defaultExemptions}
+	in := &auditInput{policySet: ps, index: idx}
+	for _, ex := range opts.Exemptions.List() {
+		in.exemptions = append(in.exemptions, report.Exemption{Subject: ex.Subject, Reason: ex.Reason})
+	}
 	in.policyRows = policyInventory(ps, idx)
 	var from, to time.Time
 	for _, w := range wls {
@@ -103,17 +98,33 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 		}
 		c.EgressGateway = gw
 		flags := report.ComputeFlags(wm, wedges, c.PrePoliced)
+		if c.Exemption != nil {
+			flags = append(flags, "EXEMPT")
+		}
 		wmeta := idx.Meta(w)
 		in.candidates = append(in.candidates, c)
-		in.workloads = append(in.workloads, report.Workload{
+		row := report.Workload{
 			Workload:  wm,
 			Replicas:  wmeta.Replicas,
+			Running:   wmeta.Running,
 			Nodes:     wmeta.Nodes,
 			Images:    wmeta.Images,
 			Candidate: c,
 			Edges:     wedges,
 			Flags:     flags,
-		})
+		}
+		// A namespace-scoped exemption is excluded from the S1 denominator
+		// wholesale; a workload-scoped one is counted as covered with a
+		// documented reason. Keeping them apart is what stops "victoria is
+		// exempt" from silently exempting grafana and vmsingle.
+		if c.Exemption != nil {
+			if c.Exemption.Workload == "" {
+				row.NamespaceExempt = true
+			} else {
+				row.Exempt = c.Exemption.Reason
+			}
+		}
+		in.workloads = append(in.workloads, row)
 		for _, ed := range wedges {
 			if from.IsZero() || ed.FirstSeen.Before(from) {
 				from = ed.FirstSeen
@@ -247,23 +258,13 @@ func cmdReport(args []string) error {
 		}
 	}
 
-	// Coverage: every workload must have rules or an exemption.
-	cov := report.Coverage{Workloads: len(in.workloads)}
-	for _, w := range in.workloads {
-		switch {
-		case len(w.Candidate.Rules) > 0:
-			cov.WithRules++
-		case len(w.Edges) == 0:
-			cov.WithoutEdges++
-		}
-	}
-	cov.WithExemptions = len(in.exemptions)
-	if cov.Workloads > 0 {
-		cov.Percent = 100 * float64(cov.WithRules+cov.WithoutEdges) / float64(cov.Workloads)
-	}
+	// Coverage: §9.4 (candidate or documented exemption) and S1 (>= 7 days
+	// of observed edges), over running workloads outside exempt namespaces.
+	cov := report.ComputeCoverage(in.workloads)
 	if *coverage {
-		fmt.Printf("workloads=%d with_rules=%d no_edges=%d coverage=%.1f%%\n",
-			cov.Workloads, cov.WithRules, cov.WithoutEdges, cov.Percent)
+		fmt.Printf("workloads=%d not_running=%d exempt_namespace=%d with_rules=%d with_exemptions=%d no_edges=%d with_7d_edges=%d coverage=%.1f%% seven_day=%.1f%%\n",
+			cov.Workloads, cov.NotRunning, cov.NamespaceExemptWorkloads, cov.WithRules, cov.WithExemptions,
+			cov.WithoutEdges, cov.With7Days, cov.Percent, cov.SevenDayPercent)
 		if *out == "" {
 			return nil
 		}

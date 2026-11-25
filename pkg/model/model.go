@@ -15,6 +15,9 @@ type Workload struct {
 	// PodLabels are the full labels of a representative pod.
 	PodLabels map[string]string
 	Labels    map[string]string
+	// HostNetwork marks a workload whose pods are not Cilium endpoints; no
+	// pod policy can select them (design §10.8).
+	HostNetwork bool
 }
 
 // Key is "namespace/kind/name".
