@@ -74,7 +74,7 @@ func usage() {
   report   [--all|--ns N] [--out DIR] [--format md|csv|json] [--coverage] [--show-policy-inventory] [--ack-pre-policed KIND/NAME]
   plan     [--ns N] [--out DIR] [--ack-pre-policed KIND/NAME] [--enforce]
   diff     [--ns N]
-  lint     DIR [--allow-world-broad] [--allow-patterns] [--ack-pre-policed KIND/NAME]
+  lint     DIR [--live=false] [--allow-world-broad] [--allow-patterns] [--ack-pre-policed KIND/NAME]
   verify   [--ns N] [--since 1h]
   explain  BLOCKED-ID
   review   EDGE-ID --state expected|unexpected|allowed_forever|ignored --reason TEXT
