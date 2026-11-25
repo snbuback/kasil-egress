@@ -543,6 +543,14 @@ func TestExemptionsNilMatchesNothing(t *testing.T) {
 	}
 }
 
+func TestRenderRefusesUnlabeledWorkload(t *testing.T) {
+	w := model.Workload{Namespace: "apps", Kind: "Deployment", Name: "unlabeled"}
+	c := Candidate{Workload: w, Rules: []Rule{{Kind: RuleFQDN, Value: "api.example.com", Ports: []Port{{Port: 443, Proto: "TCP"}}}}}
+	if _, err := Render(c, baseOpts()); err == nil || !strings.Contains(err.Error(), "endpointSelector: {}") {
+		t.Fatalf("an unlabeled workload was rendered: %v", err)
+	}
+}
+
 func TestRuleName(t *testing.T) {
 	tests := []struct {
 		w    model.Workload

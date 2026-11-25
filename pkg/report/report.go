@@ -314,16 +314,20 @@ func Markdown(w io.Writer, in Input, namespace string) error {
 		}
 		fmt.Fprintf(w, "%s\n", fanOut)
 		if len(x.Candidate.Rules) > 0 {
-			fmt.Fprintf(w, "\nsuggested policy (review, not applied):\n\n```yaml\n")
-			// Shadow, like `egressctl plan`'s default: the report is a Phase 1
-			// artifact and must never suggest an enforcing policy.
-			body, err := policy.Render(x.Candidate, policy.Options{Shadow: true})
-			if err == nil {
-				fmt.Fprintf(w, "%s", body)
+			if len(x.Selector) == 0 {
+				fmt.Fprintf(w, "\nno suggested policy: the workload has no stable pod labels, so endpointSelector would select the whole namespace\n")
 			} else {
-				fmt.Fprintf(w, "# %v\n", err)
+				fmt.Fprintf(w, "\nsuggested policy (review, not applied):\n\n```yaml\n")
+				// Shadow, like `egressctl plan`'s default: the report is a Phase 1
+				// artifact and must never suggest an enforcing policy.
+				body, err := policy.Render(x.Candidate, policy.Options{Shadow: true})
+				if err == nil {
+					fmt.Fprintf(w, "%s", body)
+				} else {
+					fmt.Fprintf(w, "# %v\n", err)
+				}
+				fmt.Fprintf(w, "```\n")
 			}
-			fmt.Fprintf(w, "```\n")
 		}
 		if len(x.Candidate.Skipped) > 0 {
 			fmt.Fprintf(w, "\nnot emitted:\n\n")

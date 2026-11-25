@@ -102,6 +102,18 @@ func TestMarkdownExemptWorkload(t *testing.T) {
 	}
 }
 
+func TestMarkdownUnlabeledWorkloadHasNoSuggestion(t *testing.T) {
+	in := fixture()
+	in.Workloads[0].Selector = nil
+	var sb strings.Builder
+	if err := Markdown(&sb, in, "frigate"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sb.String(), "no suggested policy") {
+		t.Errorf("unlabeled workload still suggests a namespace-wide policy:\n%s", sb.String())
+	}
+}
+
 func TestSummary(t *testing.T) {
 	var sb strings.Builder
 	if err := Summary(&sb, fixture()); err != nil {

@@ -19,6 +19,12 @@ func Render(c Candidate, opts Options) ([]byte, error) {
 	if c.Empty() {
 		return nil, fmt.Errorf("%s: no rules generated", c.Workload.Key())
 	}
+	if len(c.Workload.Selector) == 0 {
+		// endpointSelector: {} selects every pod in the namespace; a
+		// default-deny with that selector is the opposite of a per-workload
+		// allowlist. Refuse rather than emit it.
+		return nil, fmt.Errorf("%s: no stable pod labels, refusing to emit endpointSelector: {}", c.Workload.Key())
+	}
 
 	doc := cnpDoc{
 		APIVersion: "cilium.io/v2",
