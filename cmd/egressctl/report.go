@@ -183,7 +183,13 @@ func cmdReport(args []string) error {
 	showPol := fs.Bool("show-policy-inventory", false, "print the live policy inventory")
 	shadow := fs.Bool("shadow", true, "suggest policies in shadow mode")
 	ack := fs.String("ack-pre-policed", "", "acknowledge a foreign policy that constrains nothing (same meaning as plan)")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	if !*all && *ns == "" && !*coverage && !*showPol {
 		return fmt.Errorf("choose --all, --ns, --coverage or --show-policy-inventory")
 	}

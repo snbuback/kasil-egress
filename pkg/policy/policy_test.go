@@ -399,6 +399,100 @@ func TestGenerateGate(t *testing.T) {
 	}
 }
 
+// A foreign ceiling written the standard way pins an in-cluster peer by
+// namespace label. Pod labels never carry io.kubernetes.pod.namespace, so
+// without synthesising it from the peer's namespace the ceiling appears to
+// allow nothing: every observed rule is dropped as "already denied", the
+// policy silently under-generates, and `diff` does not count those as gaps.
+func TestNeverWidenNamespacePinnedCeiling(t *testing.T) {
+	w := testWorkload()
+	w.PodLabels["kasil.cloud/via-vpn"] = "true"
+
+	db := model.Workload{
+		Namespace: "db", Kind: "StatefulSet", Name: "postgres",
+		Selector:  map[string]string{"app": "postgres"},
+		PodLabels: map[string]string{"app": "postgres"},
+	}
+	ceiling := k8s.Policy{
+		Kind: "CiliumClusterwideNetworkPolicy", Name: "pinned-ceiling",
+		Selector: k8s.Selector{MatchLabels: map[string]string{"kasil.cloud/via-vpn": "true"}},
+		Egress: []k8s.EgressRule{{
+			ToEndpoints: []k8s.Selector{{MatchLabels: map[string]string{
+				"io.kubernetes.pod.namespace": "db",
+				"app":                         "postgres",
+			}}},
+			ToPorts: []k8s.ToPort{{Ports: []k8s.Port{{Port: "5432", Protocol: "TCP"}}}},
+		}},
+	}
+	opts := baseOpts()
+	opts.Constraint = NewConstraint([]k8s.Policy{ceiling})
+
+	in := []model.Edge{{
+		ID: 1, Workload: w, DstKind: model.KindWorkload, DstKey: "db/StatefulSet/postgres",
+		Port: 5432, Proto: "TCP", Peer: &db,
+	}}
+	c := Build(w, in, opts)
+	if len(c.Rules) != 1 || c.Rules[0].Kind != RuleWorkload {
+		t.Fatalf("namespace-pinned ceiling covered nothing: rules=%+v skipped=%+v", c.Rules, c.Skipped)
+	}
+
+	// The ceiling still bounds the port, and the skip carries the peer and
+	// port the drop applies to (the report prints "not emitted" from these).
+	out := []model.Edge{{
+		ID: 2, Workload: w, DstKind: model.KindWorkload, DstKey: "db/StatefulSet/postgres",
+		Port: 11211, Proto: "TCP", Peer: &db,
+	}}
+	c = Build(w, out, opts)
+	if len(c.Rules) != 0 {
+		t.Fatalf("a port outside the ceiling was emitted: %+v", c.Rules)
+	}
+	if len(c.Skipped) != 1 {
+		t.Fatalf("skipped = %+v, want one pre-policed-dropped entry", c.Skipped)
+	}
+	s := c.Skipped[0]
+	if s.Reason != "pre-policed-dropped" {
+		t.Errorf("reason = %q, want pre-policed-dropped", s.Reason)
+	}
+	if s.Dest != "db/StatefulSet/postgres" || s.Port.Port != 11211 || s.Port.Proto != "TCP" {
+		t.Errorf("pre-policed-dropped entry lost its destination/port: %+v", s)
+	}
+}
+
+// The dropped-edge rows must carry the destination and port of the edge, not
+// an empty placeholder: the report's "not emitted" list is what a reviewer
+// reads to decide whether the ceiling is still right.
+func TestPrePolicedDroppedKeepsDestAndPort(t *testing.T) {
+	w := testWorkload()
+	w.PodLabels["kasil.cloud/via-vpn"] = "true"
+	nanomq := model.Workload{
+		Namespace: "nanomq", Kind: "StatefulSet", Name: "nanomq",
+		Selector:  map[string]string{"app.kubernetes.io/name": "nanomq"},
+		PodLabels: map[string]string{"app.kubernetes.io/name": "nanomq"},
+	}
+	opts := baseOpts()
+	opts.Constraint = NewConstraint([]k8s.Policy{viaVPNIsolation()})
+	c := Build(w, []model.Edge{{
+		ID: 7, Workload: w, DstKind: model.KindWorkload, DstKey: "nanomq/StatefulSet/nanomq",
+		Port: 1883, Proto: "TCP", Peer: &nanomq,
+	}}, opts)
+	if len(c.Rules) != 0 {
+		t.Fatalf("in-cluster peer was not dropped: %+v", c.Rules)
+	}
+	var found bool
+	for _, s := range c.Skipped {
+		if s.Reason != "pre-policed-dropped" {
+			continue
+		}
+		found = true
+		if s.EdgeID != 7 || s.Dest != "nanomq/StatefulSet/nanomq" || s.Port.Port != 1883 || s.Port.Proto != "TCP" {
+			t.Errorf("drop row = %+v, want edge 7 to nanomq/StatefulSet/nanomq 1883/TCP", s)
+		}
+	}
+	if !found {
+		t.Fatalf("no pre-policed-dropped row: %+v", c.Skipped)
+	}
+}
+
 func TestRuleName(t *testing.T) {
 	tests := []struct {
 		w    model.Workload

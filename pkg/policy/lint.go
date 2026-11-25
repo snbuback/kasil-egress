@@ -190,25 +190,26 @@ func lintDoc(file string, doc cnpDoc, opts LintOptions) []Issue {
 
 	// Never-widen: the file may only contain peers that the foreign policies
 	// selecting this workload permit. An owned policy is never a ceiling, so
-	// a committed shadow policy cannot block its own regeneration.
-	if opts.AckPrePoliced == "" {
-		c, matched := opts.constraintFor(doc)
-		switch {
-		case matched && c != nil && c.Active():
-			for _, r := range doc.Spec.Egress {
-				for _, rule := range rulesFromYAML(r, doc.Spec.EndpointSelector.MatchLabels) {
-					if !c.AllowsAll(rule) {
-						out = append(out, add("error",
-							"rule %s:%s is outside what %s already allows — emitting it would widen an existing isolation policy (needs --ack-pre-policed with a reviewed diff)",
-							rule.Kind, rule.Value, strings.Join(c.Refs(), ","))...)
-					}
+	// a committed shadow policy cannot block its own regeneration. The
+	// acknowledgement is scoped to the file whose ceiling it names: acking
+	// via-vpn-isolation must not silence the check for a policy whose ceiling
+	// is something else, which is what a plain "is the flag set" test did.
+	c, matched := opts.constraintFor(doc)
+	switch {
+	case matched && c != nil && c.Active() && !c.AcknowledgedActive(opts.AckPrePoliced):
+		for _, r := range doc.Spec.Egress {
+			for _, rule := range rulesFromYAML(r, doc.Spec.EndpointSelector.MatchLabels) {
+				if !c.AllowsAll(rule) {
+					out = append(out, add("error",
+						"rule %s:%s is outside what %s already allows — emitting it would widen an existing isolation policy (needs --ack-pre-policed with a reviewed diff)",
+						rule.Kind, rule.Value, strings.Join(c.Refs(), ","))...)
 				}
 			}
-		case !matched && opts.Targets != nil:
-			out = append(out, add("warning",
-				"no live workload matches endpointSelector %q or the name %q — never-widen check not evaluated (stale file?)",
-				canonicalSelector(doc.Spec.EndpointSelector.MatchLabels), doc.Metadata.Name)...)
 		}
+	case !matched && opts.Targets != nil:
+		out = append(out, add("warning",
+			"no live workload matches endpointSelector %q or the name %q — never-widen check not evaluated (stale file?)",
+			canonicalSelector(doc.Spec.EndpointSelector.MatchLabels), doc.Metadata.Name)...)
 	}
 	return out
 }

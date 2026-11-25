@@ -119,12 +119,22 @@ func Build(w model.Workload, edges []model.Edge, opts Options) Candidate {
 		c.Skipped = append(c.Skipped, Skipped{EdgeID: e.ID, Dest: e.DstKey, Port: Port{e.Port, e.Proto}, Reason: reason})
 	}
 
+	// observed remembers each edge's own destination and port so that a rule
+	// dropped by a pre-existing ceiling is reported with the exact peer and
+	// port that edge carried, not the merged rule's whole port list.
+	type edgeObs struct {
+		dest string
+		port Port
+	}
+	observed := map[int64]edgeObs{}
+
 	for _, e := range edges {
 		if e.Port == 0 || (e.Proto != "TCP" && e.Proto != "UDP" && e.Proto != "SCTP") {
 			skip(e, "non-tcp-udp")
 			continue
 		}
 		port := Port{e.Port, e.Proto}
+		observed[e.ID] = edgeObs{dest: e.DstKey, port: port}
 		switch e.DstKind {
 		case model.KindWorkload:
 			if e.Peer == nil || len(e.Peer.Selector) == 0 {
@@ -176,19 +186,22 @@ func Build(w model.Workload, edges []model.Edge, opts Options) Candidate {
 		var kept []Rule
 		for _, k := range order {
 			r := acc[k]
-			allowed := true
-			for _, p := range r.Ports {
-				if !opts.Constraint.Allows(*r, p) {
-					allowed = false
-					break
-				}
-			}
-			if allowed {
+			targeted := deniedPorts(*r, opts.Constraint)
+			if len(targeted) == 0 {
 				kept = append(kept, *r)
 				continue
 			}
+			// One row per dropped edge, with that edge's own destination and
+			// port: the report's "not emitted" list is what a reviewer reads
+			// to decide whether the ceiling is still the right one.
 			for _, id := range r.EdgeIDs {
-				c.Skipped = append(c.Skipped, Skipped{EdgeID: id, Dest: r.Value, Reason: "pre-policed-dropped"})
+				obs, ok := observed[id]
+				if !ok {
+					obs = edgeObs{dest: r.Value}
+				}
+				if !opts.Constraint.Allows(*r, obs.port) {
+					c.Skipped = append(c.Skipped, Skipped{EdgeID: id, Dest: obs.dest, Port: obs.port, Reason: "pre-policed-dropped"})
+				}
 			}
 			delete(acc, k)
 		}
@@ -245,6 +258,18 @@ func (c Candidate) NeedsDNSRule() bool {
 
 // Empty reports whether nothing would be emitted.
 func (c Candidate) Empty() bool { return len(c.Rules) == 0 }
+
+// deniedPorts returns the ports of a rule that the existing ceiling does not
+// allow. An empty result means the whole rule is inside the ceiling.
+func deniedPorts(r Rule, c *Constraint) []Port {
+	var out []Port
+	for _, p := range r.Ports {
+		if !c.Allows(r, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // RuleName is the CNP object name for a workload.
 func RuleName(w model.Workload) string {

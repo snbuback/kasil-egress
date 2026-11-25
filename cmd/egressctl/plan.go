@@ -32,7 +32,13 @@ func cmdPlan(args []string) error {
 	enforce := fs.Bool("enforce", false, "emit enableDefaultDeny.egress: true (default is shadow)")
 	ack := fs.String("ack-pre-policed", "", "acknowledge that the plan widens this pre-existing policy")
 	record := fs.Bool("record", false, "record the generated rules in egress.policy/policy_rule")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	e, err := load()
 	if err != nil {
 		return err
@@ -126,7 +132,13 @@ func cmdDiff(args []string) error {
 	load := registerEnv(fs)
 	ns := fs.String("ns", "", "namespace to diff (empty = every namespace)")
 	quiet := fs.Bool("quiet", false, "only print gaps")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	e, err := load()
 	if err != nil {
 		return err
@@ -195,11 +207,17 @@ func cmdLint(args []string) error {
 	allowPatterns := fs.Bool("allow-patterns", false, "permit toFQDNs matchPattern rules")
 	ack := fs.String("ack-pre-policed", "", "acknowledge widening a pre-existing policy")
 	live := fs.Bool("live", true, "resolve pre-existing policies from the cluster")
-	_ = fs.Parse(args)
-	if fs.NArg() == 0 {
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
 		return fmt.Errorf("usage: egressctl lint DIR [flags]")
 	}
-	dir := fs.Arg(0)
+	dir := pos[0]
+	if err := noPositional(pos[1:]); err != nil {
+		return err
+	}
 
 	ev, err := load()
 	if err != nil {
@@ -213,12 +231,12 @@ func cmdLint(args []string) error {
 		AckPrePoliced:   *ack,
 	}
 	if *live {
+		// Live lint reads only the API server: no DSN, no database.
 		ctx := context.Background()
-		db, client, err := ev.open(ctx)
+		client, err := ev.kubeClient()
 		if err != nil {
 			return err
 		}
-		defer db.Close()
 		idx := k8s.NewIndex(client)
 		if err := idx.Refresh(ctx); err != nil {
 			return err

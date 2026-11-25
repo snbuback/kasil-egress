@@ -21,7 +21,13 @@ func cmdAuditGuard(args []string) error {
 	load := registerEnv(fs)
 	maxDur := fs.Duration("max-duration", 72*time.Hour, "fail once audit mode has been on for longer than this")
 	state := fs.String("state-configmap", "", "namespace/name of the state ConfigMap")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	if *state == "" {
 		return fmt.Errorf("--state-configmap namespace/name is required")
 	}

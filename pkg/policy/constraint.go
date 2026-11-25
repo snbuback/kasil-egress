@@ -169,8 +169,9 @@ func ruleAllowsPeer(rule k8s.EgressRule, r Rule) bool {
 	}
 	switch r.Kind {
 	case RuleWorkload:
+		labels := peerLabels(r)
 		for _, sel := range rule.ToEndpoints {
-			if selectorCovers(sel, r.PeerLabels) {
+			if selectorCovers(sel, labels) {
 				return true
 			}
 		}
@@ -231,6 +232,33 @@ func ruleAllowsPort(rule k8s.EgressRule, p Port) bool {
 		}
 	}
 	return false
+}
+
+// NamespaceLabel is the identity label Cilium attaches to every pod, and the
+// usual way a foreign policy pins a toEndpoints peer to a namespace.
+const NamespaceLabel = "io.kubernetes.pod.namespace"
+
+// peerLabels adds the namespace identity to a peer's pod labels. Kubernetes
+// pod labels never carry io.kubernetes.pod.namespace, but a toEndpoints
+// selector written the standard way does, so a ceiling written as
+// `matchLabels: {io.kubernetes.pod.namespace: demo, app: db}` would otherwise
+// cover nothing and silently under-generate.
+func peerLabels(r Rule) map[string]string {
+	if r.Namespace == "" {
+		return r.PeerLabels
+	}
+	if _, ok := r.PeerLabels[NamespaceLabel]; ok {
+		return r.PeerLabels
+	}
+	if _, ok := r.PeerLabels["k8s:"+NamespaceLabel]; ok {
+		return r.PeerLabels
+	}
+	out := make(map[string]string, len(r.PeerLabels)+1)
+	for k, v := range r.PeerLabels {
+		out[k] = v
+	}
+	out[NamespaceLabel] = r.Namespace
+	return out
 }
 
 // selectorCovers reports whether a Cilium endpoint selector matches a set of

@@ -290,6 +290,102 @@ func TestLintIgnoresOwnedPolicy(t *testing.T) {
 	}
 }
 
+// appsCeiling is a foreign policy for the apps namespace that allows one
+// in-cluster peer, pinned the standard way (namespace label + app label).
+func appsCeiling() k8s.Policy {
+	return k8s.Policy{
+		Kind: "CiliumClusterwideNetworkPolicy", Name: "apps-ceiling",
+		Selector: k8s.Selector{MatchLabels: map[string]string{"app": "backup"}},
+		Egress: []k8s.EgressRule{{
+			ToEndpoints: []k8s.Selector{{MatchLabels: map[string]string{
+				"io.kubernetes.pod.namespace": "db",
+				"app":                         "postgres",
+			}}},
+			ToPorts: []k8s.ToPort{{Ports: []k8s.Port{{Port: "5432", Protocol: "TCP"}}}},
+		}},
+	}
+}
+
+const backupBody = `apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backup-egress
+  namespace: apps
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backup
+  enableDefaultDeny:
+    egress: true
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: nanomq
+            app.kubernetes.io/name: nanomq
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+`
+
+// The acknowledgement names the policy being widened. It must not silence the
+// never-widen check for a file whose ceiling is a different policy — the old
+// check was "is the flag set at all".
+func TestLintAckIsScopedToTheNamedPolicy(t *testing.T) {
+	opts := lintOpts()
+	opts.Targets = []LintTarget{{
+		Namespace:  "apps",
+		Kind:       "Deployment",
+		Name:       "backup",
+		Selector:   map[string]string{"app": "backup"},
+		Constraint: NewConstraint([]k8s.Policy{appsCeiling()}),
+	}}
+
+	opts.AckPrePoliced = "CiliumClusterwideNetworkPolicy/via-vpn-isolation"
+	if issues := issuesFor(t, backupBody, opts); !hasIssue(issues, "apps-ceiling") {
+		t.Fatalf("an acknowledgement for another policy silenced the check: %v", issues)
+	}
+
+	opts.AckPrePoliced = "CiliumClusterwideNetworkPolicy/apps-ceiling"
+	if issues := issuesFor(t, backupBody, opts); hasIssue(issues, "outside what") {
+		t.Fatalf("the named ceiling was not acknowledged: %v", issues)
+	}
+}
+
+// An acknowledgement applies to the file whose ceiling it names, not to every
+// file in the directory.
+func TestLintAckDoesNotSilenceOtherFiles(t *testing.T) {
+	dir := t.TempDir()
+	writePolicy(t, dir, "untrusted.yaml", untrustedBody)
+	writePolicy(t, dir, "backup.yaml", backupBody)
+
+	opts := lintOpts()
+	opts.Targets = []LintTarget{
+		{
+			Namespace: "apps", Kind: "Deployment", Name: "untrusted",
+			Selector:   map[string]string{"app": "untrusted"},
+			Constraint: NewConstraint([]k8s.Policy{viaVPNIsolation()}),
+		},
+		{
+			Namespace: "apps", Kind: "Deployment", Name: "backup",
+			Selector:   map[string]string{"app": "backup"},
+			Constraint: NewConstraint([]k8s.Policy{appsCeiling()}),
+		},
+	}
+	opts.AckPrePoliced = "CiliumClusterwideNetworkPolicy/via-vpn-isolation"
+
+	issues, err := LintFiles(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasIssue(issues, "apps-ceiling") {
+		t.Errorf("the unacknowledged file was not checked: %v", issues)
+	}
+	if hasIssue(issues, "via-vpn-isolation") {
+		t.Errorf("the acknowledged file was checked: %v", issues)
+	}
+}
+
 func TestLintDuplicateSelectors(t *testing.T) {
 	dir := t.TempDir()
 	writePolicy(t, dir, "a.yaml", goodPolicy)

@@ -21,7 +21,13 @@ func cmdVerify(args []string) error {
 	load := registerEnv(fs)
 	ns := fs.String("ns", "", "namespace")
 	since := fs.Duration("since", time.Hour, "window")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	e, err := load()
 	if err != nil {
 		return err
@@ -95,13 +101,19 @@ func cmdVerify(args []string) error {
 func cmdExplain(args []string) error {
 	fs := flag.NewFlagSet("explain", flag.ExitOnError)
 	load := registerEnv(fs)
-	_ = fs.Parse(args)
-	if fs.NArg() == 0 {
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
 		return fmt.Errorf("usage: egressctl explain BLOCKED-ID")
 	}
+	if err := noPositional(pos[1:]); err != nil {
+		return err
+	}
 	var id int64
-	if _, err := fmt.Sscanf(fs.Arg(0), "%d", &id); err != nil {
-		return fmt.Errorf("invalid id %q", fs.Arg(0))
+	if _, err := fmt.Sscanf(pos[0], "%d", &id); err != nil {
+		return fmt.Errorf("invalid id %q", pos[0])
 	}
 	e, err := load()
 	if err != nil {
@@ -184,9 +196,15 @@ func cmdReview(args []string) error {
 	reason := fs.String("reason", "", "why")
 	by := fs.String("by", defaultUser(), "who decided")
 	expires := fs.Duration("expires", 0, "suppress for this long (ignored only)")
-	_ = fs.Parse(args)
-	if fs.NArg() == 0 {
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
 		return fmt.Errorf("usage: egressctl review EDGE-ID --state S --reason R")
+	}
+	if err := noPositional(pos[1:]); err != nil {
+		return err
 	}
 	switch *state {
 	case model.ReviewExpected, model.ReviewUnexpected, model.ReviewAllowedForever, model.ReviewIgnored:
@@ -197,8 +215,8 @@ func cmdReview(args []string) error {
 		return fmt.Errorf("--reason is required: the decision has to be auditable")
 	}
 	var id int64
-	if _, err := fmt.Sscanf(fs.Arg(0), "%d", &id); err != nil {
-		return fmt.Errorf("invalid edge id %q", fs.Arg(0))
+	if _, err := fmt.Sscanf(pos[0], "%d", &id); err != nil {
+		return fmt.Errorf("invalid edge id %q", pos[0])
 	}
 	e, err := load()
 	if err != nil {
@@ -228,7 +246,13 @@ func cmdDigest(args []string) error {
 	out := fs.String("out", "", "write the markdown here instead of stdout")
 	webhook := fs.String("webhook-url", "", `POST {"content": md} to this URL (Discord-compatible)`)
 	since := fs.Duration("since", 7*24*time.Hour, "review window")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	e, err := load()
 	if err != nil {
 		return err

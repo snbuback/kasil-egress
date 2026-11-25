@@ -13,6 +13,9 @@ import (
 // openDB opens only the database. verify/explain/review/digest/schema do not
 // need the API server.
 func openDB(ctx context.Context, e env) (*pg.DB, error) {
+	if err := e.requireDSN(); err != nil {
+		return nil, err
+	}
 	db, err := pg.Open(ctx, e.dsn)
 	if err != nil {
 		return nil, err
@@ -27,9 +30,15 @@ func openDB(ctx context.Context, e env) (*pg.DB, error) {
 func cmdSchema(args []string) error {
 	fs := flag.NewFlagSet("schema", flag.ExitOnError)
 	load := registerEnv(fs)
-	_ = fs.Parse(args)
-	if fs.NArg() == 0 || fs.Arg(0) != "apply" {
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 || pos[0] != "apply" {
 		return fmt.Errorf("usage: egressctl schema apply")
+	}
+	if err := noPositional(pos[1:]); err != nil {
+		return err
 	}
 	e, err := load()
 	if err != nil {
@@ -56,7 +65,13 @@ func cmdMaintain(args []string) error {
 	hourly := fs.Duration("retention-hourly", 180*24*time.Hour, "flow_hourly retention")
 	blocked := fs.Duration("retention-blocked", 90*24*time.Hour, "blocked_flow retention")
 	dns := fs.Duration("retention-dns", 90*24*time.Hour, "dns_name retention")
-	_ = fs.Parse(args)
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := noPositional(pos); err != nil {
+		return err
+	}
 	e, err := load()
 	if err != nil {
 		return err
