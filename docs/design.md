@@ -367,7 +367,7 @@ Use an existing Hubble→CNP generator (`SoulKyu/cpg`, `onzack/cf2cnp`) plus hub
                   └──────────────────────────┘
                                                          │ generated YAML
                                                          ▼
-                              kasil-apps/apps/egress/policies/<ns>/<workload>.yaml
+                              kasil-apps/apps/egress/files/policies/<ns>/<workload>.yaml
                                                          │ git push
                                                          ▼
                                      kasil-cd pipeline → ArgoCD → CNP enforced
@@ -766,7 +766,7 @@ Record the exercised list in the report appendix so a later reader knows what "c
 
 ### 10.1 Policy model
 
-One `CiliumNetworkPolicy` per workload, egress-only, named `<workload>-egress`, living in `kasil-apps/apps/egress/policies/<namespace>/<workload>.yaml`. Plus a small set of cluster-wide policies.
+One `CiliumNetworkPolicy` per workload, egress-only, named `<workload>-egress`, living in `kasil-apps/apps/egress/files/policies/<namespace>/<workload>.yaml` (the `files/` prefix is what `templates/policies-generated.yaml` reads with `.Files.Glob`; a policy outside it is never rendered). Plus a small set of cluster-wide policies.
 
 **Always-allowed baseline (applied first, cluster-wide — at the start of Phase 1, §9.1 step 1.2a):**
 
