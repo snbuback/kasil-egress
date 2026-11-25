@@ -218,6 +218,20 @@ func Build(w model.Workload, edges []model.Edge, opts Options) Candidate {
 	return c
 }
 
+// Generate applies the pre-policed gate to Build. When a foreign policy
+// selects the workload without constraining egress and the acknowledgement
+// does not cover it, the result is a rules-less PRE-POLICED placeholder: the
+// report, plan and diff all go through this one call, so they agree on when a
+// human decision is required.
+func Generate(w model.Workload, edges []model.Edge, opts Options) Candidate {
+	if opts.Constraint != nil && opts.Constraint.BlocksGeneration(opts.AckPrePoliced) {
+		c := Candidate{Workload: w, PrePoliced: opts.Constraint.Refs()}
+		c.Skipped = append(c.Skipped, Skipped{Reason: "pre-policed-skip"})
+		return c
+	}
+	return Build(w, edges, opts)
+}
+
 // NeedsDNSRule reports whether the candidate has FQDN rules and therefore
 // needs the companion L7 DNS rule.
 func (c Candidate) NeedsDNSRule() bool {

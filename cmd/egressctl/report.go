@@ -96,16 +96,7 @@ func collect(ctx context.Context, db *pg.DB, client *k8s.Client, e env, namespac
 		o.Constraint = constraint
 
 		wm := w.Model()
-		var c policy.Candidate
-		if constraint.BlocksGeneration(o.AckPrePoliced) {
-			// A foreign policy selects the workload but constrains nothing:
-			// a human has to name it with --ack-pre-policed before the tool
-			// will emit a policy that unions with it.
-			c = policy.Candidate{Workload: wm, PrePoliced: constraint.Refs()}
-			c.Skipped = append(c.Skipped, policy.Skipped{Reason: "pre-policed-skip"})
-		} else {
-			c = policy.Build(wm, wedges, o)
-		}
+		c := policy.Generate(wm, wedges, o)
 		var gw []string
 		for _, g := range gateways {
 			gw = append(gw, g.Ref()+"→"+g.EgressIP)

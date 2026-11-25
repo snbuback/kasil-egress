@@ -361,6 +361,44 @@ func TestAckLiftsForeignInactiveSkip(t *testing.T) {
 	}
 }
 
+// Generate is the single gate report, plan and diff use. With only the
+// pipeline's own policies applied (baseline, exemptions, a committed shadow
+// policy) it must produce a real candidate; with a foreign inactive policy it
+// must produce the PRE-POLICED placeholder until the policy is named.
+func TestGenerateGate(t *testing.T) {
+	edges := []model.Edge{edge(1, model.KindFQDN, "api.telegram.org", 443, "TCP")}
+	hasSkip := func(c Candidate, reason string) bool {
+		for _, s := range c.Skipped {
+			if s.Reason == reason {
+				return true
+			}
+		}
+		return false
+	}
+
+	opts := baseOpts()
+	opts.Constraint = NewConstraint([]k8s.Policy{baselinePolicy()})
+	if c := Generate(testWorkload(), edges, opts); len(c.Rules) != 1 || hasSkip(c, "pre-policed-skip") {
+		t.Fatalf("baseline blocked generation: rules=%d skipped=%+v", len(c.Rules), c.Skipped)
+	}
+
+	foreign := viaVPNIsolation()
+	foreign.EnableDefaultDenyEgress = boolPtr(false)
+	opts.Constraint = NewConstraint([]k8s.Policy{foreign})
+	c := Generate(testWorkload(), edges, opts)
+	if len(c.Rules) != 0 || !hasSkip(c, "pre-policed-skip") {
+		t.Fatalf("foreign inactive policy did not skip: rules=%d skipped=%+v", len(c.Rules), c.Skipped)
+	}
+	if len(c.PrePoliced) != 1 {
+		t.Errorf("placeholder must name the blocking policy: %v", c.PrePoliced)
+	}
+
+	opts.AckPrePoliced = "CiliumClusterwideNetworkPolicy/via-vpn-isolation"
+	if c := Generate(testWorkload(), edges, opts); len(c.Rules) != 1 || hasSkip(c, "pre-policed-skip") {
+		t.Fatalf("acknowledged foreign policy still skipped: rules=%d skipped=%+v", len(c.Rules), c.Skipped)
+	}
+}
+
 func TestRuleName(t *testing.T) {
 	tests := []struct {
 		w    model.Workload
