@@ -262,9 +262,9 @@ func cmdReport(args []string) error {
 	// of observed edges), over running workloads outside exempt namespaces.
 	cov := report.ComputeCoverage(in.workloads)
 	if *coverage {
-		fmt.Printf("workloads=%d not_running=%d exempt_namespace=%d with_rules=%d with_exemptions=%d no_edges=%d with_7d_edges=%d coverage=%.1f%% seven_day=%.1f%%\n",
+		fmt.Printf("workloads=%d not_running=%d exempt_namespace=%d with_rules=%d with_exemptions=%d no_edges=%d unresolved=%d with_7d_edges=%d coverage=%.1f%% seven_day=%.1f%%\n",
 			cov.Workloads, cov.NotRunning, cov.NamespaceExemptWorkloads, cov.WithRules, cov.WithExemptions,
-			cov.WithoutEdges, cov.With7Days, cov.Percent, cov.SevenDayPercent)
+			cov.WithoutEdges, cov.Unresolved, cov.With7Days, cov.Percent, cov.SevenDayPercent)
 		if *out == "" {
 			return nil
 		}

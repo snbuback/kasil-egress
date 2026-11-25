@@ -150,6 +150,10 @@ audited but not counted):
 - `seven_day` — S1: at least 7 days of observed edges (the actual gate,
   `seven_day >= 95.0`).
 
+`no_edges` and `unresolved` are the two ways a workload can be uncovered:
+nothing observed at all, or edges the generator could not turn into a rule
+(a public IP with no DNS name, an unresolved peer).
+
 Read them together: an exemption covers a workload in the §9.4 sense without
 proving that its traffic was captured, which is exactly the gap S1 measures.
 `not_running` and `exempt_namespace` are printed too, so a denominator that

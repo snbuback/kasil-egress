@@ -107,16 +107,22 @@ type Coverage struct {
 	WithRules                int
 	WithExemptions           int
 	WithoutEdges             int
-	With7Days                int
-	Percent                  float64
-	SevenDayPercent          float64
+	// Unresolved are running workloads that have observed edges but no
+	// allowlist candidate and no exemption: the edges exist, the generator
+	// could not turn them into a rule (world-unnamed, peer-unresolved).
+	Unresolved      int
+	With7Days       int
+	Percent         float64
+	SevenDayPercent float64
 }
 
 // ComputeCoverage builds the Phase 1 coverage numbers. Workloads with no
 // running pod, and every workload in an exempt namespace, are outside the S1
 // denominator (§1: "running workloads ... excluding exempt namespaces").
 // Covered means a generated allowlist candidate or a documented exemption; a
-// zero-edge workload is neither, so it is not silently counted as covered.
+// zero-edge workload is neither, and neither is an edge-bearing workload the
+// generator could not resolve (Unresolved), so neither is silently counted as
+// covered.
 func ComputeCoverage(ws []Workload) Coverage {
 	var c Coverage
 	for _, w := range ws {
@@ -136,6 +142,8 @@ func ComputeCoverage(ws []Workload) Coverage {
 			c.WithExemptions++
 		case len(w.Edges) == 0:
 			c.WithoutEdges++
+		default:
+			c.Unresolved++
 		}
 		if edgeSpan(w.Edges) >= RequiredEdgeDays*24*time.Hour {
 			c.With7Days++
@@ -352,6 +360,7 @@ func Summary(w io.Writer, in Input) error {
 	fmt.Fprintf(w, "- workloads with generated rules: %d\n", in.Coverage.WithRules)
 	fmt.Fprintf(w, "- workloads covered by a documented exemption: %d\n", in.Coverage.WithExemptions)
 	fmt.Fprintf(w, "- workloads without observed egress: %d\n", in.Coverage.WithoutEdges)
+	fmt.Fprintf(w, "- workloads with edges but no allowlist candidate: %d\n", in.Coverage.Unresolved)
 	fmt.Fprintf(w, "- workloads with >= %d days of observed edges: %d\n", RequiredEdgeDays, in.Coverage.With7Days)
 	fmt.Fprintf(w, "- coverage (candidate or exemption, §9.4): %.1f%%\n", in.Coverage.Percent)
 	fmt.Fprintf(w, "- coverage (>= %d days of edges, S1): %.1f%%\n", RequiredEdgeDays, in.Coverage.SevenDayPercent)

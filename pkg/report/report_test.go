@@ -254,6 +254,15 @@ func TestCoverageExemptionCountsAsCovered(t *testing.T) {
 	}
 }
 
+func TestCoverageUnresolvedEdges(t *testing.T) {
+	w := model.Workload{Namespace: "x", Kind: "Deployment", Name: "odd"}
+	edges := []model.Edge{{FirstSeen: time.Now(), LastSeen: time.Now(), DstKind: model.KindCIDR, DstKey: "140.82.121.6/32"}}
+	cov := ComputeCoverage([]Workload{{Workload: w, Running: 1, Edges: edges}})
+	if cov.Unresolved != 1 || cov.Percent != 0 {
+		t.Fatalf("coverage = %+v, want an edge-bearing workload with no candidate to be unresolved", cov)
+	}
+}
+
 func TestCoverageSevenDayGate(t *testing.T) {
 	w := model.Workload{Namespace: "x", Kind: "Deployment", Name: "young"}
 	now := time.Now()
