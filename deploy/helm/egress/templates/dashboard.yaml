@@ -1,0 +1,17 @@
+{{- if .Values.monitoring.dashboard.enabled }}
+# Discovered by the Grafana dashboard sidecar (label grafana_dashboard=1).
+# Panels are documented in files/dashboards/egress.json.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "egress.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.dashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  egress.json: |-
+{{ .Files.Get "files/dashboards/egress.json" | indent 4 }}
+{{- end }}

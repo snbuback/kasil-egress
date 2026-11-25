@@ -1,0 +1,128 @@
+{{- if .Values.collector.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "egress.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  selector:
+    matchLabels:
+      {{- include "egress.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: collector
+  updateStrategy:
+    {{- toYaml .Values.collector.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "egress.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: collector
+      annotations:
+        checksum/config: {{ .Values.collector.files | toJson | sha256sum }}
+        {{- with .Values.collector.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "egress.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: egressd
+          image: {{ include "egress.collectorImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --log-dir={{ .Values.collector.mountPath }}
+            - --files={{ join "," .Values.collector.files }}
+            - --node=$(NODE_NAME)
+            - --metrics-addr=:{{ .Values.collector.metricsPort }}
+            - --spool-dir=/var/lib/egressd
+            - --batch-size={{ .Values.collector.batchSize }}
+            - --flush-interval={{ .Values.collector.flushInterval }}
+            - --checkpoint-interval={{ .Values.collector.checkpointInterval }}
+            - --pod-cidr={{ .Values.cluster.podCIDR }}
+            - --svc-cidr={{ .Values.cluster.svcCIDR }}
+            - --timezone={{ .Values.cluster.timezone }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: TZ
+              value: {{ .Values.cluster.timezone | quote }}
+            {{- include "egress.dsnEnv" . | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.collector.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "egress.dsnVolumeMount" . | nindent 12 }}
+            - name: hubble-logs
+              mountPath: {{ .Values.collector.mountPath }}
+              readOnly: true
+            - name: spool
+              mountPath: /var/lib/egressd
+      volumes:
+        {{- include "egress.dsnVolume" . | nindent 8 }}
+        - name: hubble-logs
+          hostPath:
+            path: {{ .Values.collector.hostPath }}
+            type: DirectoryOrCreate
+        # The spool must survive a pod restart; a hostPath also keeps it out of
+        # the read-only root filesystem.
+        - name: spool
+          hostPath:
+            path: {{ .Values.collector.spoolHostPath }}
+            type: DirectoryOrCreate
+      {{- with .Values.collector.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collector.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collector.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "egress.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  clusterIP: None
+  selector:
+    {{- include "egress.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+  ports:
+    - name: metrics
+      port: {{ .Values.collector.metricsPort }}
+      targetPort: metrics
+{{- end }}

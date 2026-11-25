@@ -1,0 +1,72 @@
+{{- if .Values.policies.baselineDNS }}
+# Always allowed, for every pod. Two jobs:
+#
+#  1. DNS to kube-dns. The rules.dns block is what makes Cilium install the
+#     DNS proxy redirect for an endpoint; without it toFQDNs can never resolve
+#     and the Phase 1 DNS inventory stays empty.
+#  2. apiserver access.
+#
+# enableDefaultDeny.egress is false on purpose: a cluster-wide policy selecting
+# all pods that enabled default-deny would put the whole cluster into
+# default-deny egress in one apply, which is exactly the outage this tooling
+# exists to avoid. Individual workload policies enable it.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: baseline-dns-apiserver
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+spec:
+  description: >-
+    DNS to kube-dns and apiserver access for every pod. Applied before any
+    workload policy so a new default-deny never breaks DNS or the API.
+  endpointSelector: {}
+  enableDefaultDeny:
+    egress: false
+    ingress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
+{{- range .Values.policies.exemptions }}
+---
+# Documented exemption: {{ . }} is deliberately not policed.
+#
+# The rule below is an explicit, visible no-op (enableDefaultDeny.egress is
+# false and the peer set is "everything"), so the exemption exists in Git with
+# a reason instead of being an absence someone has to infer from a report.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: allow-all-{{ . }}
+  labels:
+    {{- include "egress.labels" $ | nindent 4 }}
+spec:
+  description: "documented exemption: {{ . }} is not egress-policed in v1"
+  endpointSelector:
+    matchLabels:
+      io.kubernetes.pod.namespace: {{ . }}
+  enableDefaultDeny:
+    egress: false
+    ingress: false
+  egress:
+    - toEntities:
+        - all
+{{- end }}

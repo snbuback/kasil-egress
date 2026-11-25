@@ -1,0 +1,92 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "egress.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+# Reading the pod/workload inventory is what turns a flow's source pod into a
+# top-level workload; reading the Cilium policy objects is what makes the
+# never-widen rule possible. Nothing here can write to the cluster except the
+# audit guard's own state ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "egress.fullname" . }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cilium.io"]
+    resources:
+      - ciliumnetworkpolicies
+      - ciliumclusterwidenetworkpolicies
+      - ciliumegressgatewaypolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "egress.fullname" . }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "egress.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "egress.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# The audit guard maintains a single ConfigMap in its own namespace; scope the
+# write permission to that namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "egress.fullname" . }}-audit-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.auditGuard.stateConfigMap | quote }}]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "egress.fullname" . }}-audit-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "egress.fullname" . }}-audit-guard
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "egress.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

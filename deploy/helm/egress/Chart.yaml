@@ -1,0 +1,20 @@
+apiVersion: v2
+name: egress
+description: >-
+  Egress allowlisting toolkit for Cilium: flow-log collector (egressd), audit
+  report and policy generator (egressctl), alerts, dashboard and the
+  cluster-wide baseline policies.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - cilium
+  - egress
+  - networkpolicy
+  - hubble
+home: https://github.com/snbuback/kasil-egress
+sources:
+  - https://github.com/snbuback/kasil-egress
+maintainers:
+  - name: snbuback

@@ -1,0 +1,284 @@
+package k8s
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
+// Selector is a Kubernetes label selector (metav1.LabelSelector subset).
+type Selector struct {
+	MatchLabels      map[string]string     `json:"matchLabels,omitempty" yaml:"matchLabels,omitempty"`
+	MatchExpressions []SelectorRequirement `json:"matchExpressions,omitempty" yaml:"matchExpressions,omitempty"`
+}
+
+// SelectorRequirement is one matchExpressions entry.
+type SelectorRequirement struct {
+	Key      string   `json:"key" yaml:"key"`
+	Operator string   `json:"operator" yaml:"operator"`
+	Values   []string `json:"values,omitempty" yaml:"values,omitempty"`
+}
+
+// Port is one toPorts.ports entry. Port is a string in the CRD.
+type Port struct {
+	Port     string `json:"port" yaml:"port"`
+	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+}
+
+// EgressRule is the subset of a Cilium egress rule this tool understands.
+type EgressRule struct {
+	ToEndpoints []Selector   `json:"toEndpoints,omitempty" yaml:"toEndpoints,omitempty"`
+	ToCIDR      []string     `json:"toCIDR,omitempty" yaml:"toCIDR,omitempty"`
+	ToCIDRSet   []CIDRSet    `json:"toCIDRSet,omitempty" yaml:"toCIDRSet,omitempty"`
+	ToEntities  []string     `json:"toEntities,omitempty" yaml:"toEntities,omitempty"`
+	ToFQDNs     []FQDNMatch  `json:"toFQDNs,omitempty" yaml:"toFQDNs,omitempty"`
+	ToServices  []ServiceRef `json:"toServices,omitempty" yaml:"toServices,omitempty"`
+	ToPorts     []ToPort     `json:"toPorts,omitempty" yaml:"toPorts,omitempty"`
+}
+
+// CIDRSet is a toCIDRSet entry.
+type CIDRSet struct {
+	Cidr   string   `json:"cidr" yaml:"cidr"`
+	Except []string `json:"except,omitempty" yaml:"except,omitempty"`
+}
+
+// FQDNMatch is a toFQDNs entry.
+type FQDNMatch struct {
+	MatchName    string `json:"matchName,omitempty" yaml:"matchName,omitempty"`
+	MatchPattern string `json:"matchPattern,omitempty" yaml:"matchPattern,omitempty"`
+}
+
+// ServiceRef is a toServices entry.
+type ServiceRef struct {
+	K8sService *K8sService `json:"k8sService,omitempty" yaml:"k8sService,omitempty"`
+}
+
+// K8sService names a Kubernetes service.
+type K8sService struct {
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	ServiceName string `json:"serviceName,omitempty" yaml:"serviceName,omitempty"`
+}
+
+// ToPort is a toPorts entry.
+type ToPort struct {
+	Ports []Port   `json:"ports,omitempty" yaml:"ports,omitempty"`
+	Rules *L7Rules `json:"rules,omitempty" yaml:"rules,omitempty"`
+}
+
+// L7Rules is the L7 part of a toPorts entry.
+type L7Rules struct {
+	DNS []FQDNMatch `json:"dns,omitempty" yaml:"dns,omitempty"`
+}
+
+// Ports returns every port/proto pair the rule permits. An empty result means
+// "all ports" (Cilium's semantics when toPorts is omitted).
+func (r EgressRule) Ports() []Port {
+	var out []Port
+	for _, tp := range r.ToPorts {
+		out = append(out, tp.Ports...)
+	}
+	return out
+}
+
+// HasDNSRules reports whether the rule carries an L7 DNS block (which is what
+// makes Cilium install the DNS proxy redirect for the endpoint).
+func (r EgressRule) HasDNSRules() bool {
+	for _, tp := range r.ToPorts {
+		if tp.Rules != nil && len(tp.Rules.DNS) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Policy is a CiliumNetworkPolicy or CiliumClusterwideNetworkPolicy.
+type Policy struct {
+	Kind                    string
+	Namespace               string
+	Name                    string
+	Description             string
+	Selector                Selector
+	EnableDefaultDenyEgress *bool
+	Egress                  []EgressRule
+	// Gateway is set when the object is a CiliumEgressGatewayPolicy, which
+	// does not filter traffic at all: it only changes the source IP the world
+	// sees. It is reported, never policed.
+	Gateway          bool
+	DestinationCIDRs []string
+	EgressIP         string
+	Selectors        []Selector // CEGP pod selectors
+}
+
+// Ref returns "Kind/name".
+func (p Policy) Ref() string { return p.Kind + "/" + p.Name }
+
+// ConstrainsEgress reports whether the policy switches a selected endpoint to
+// egress default-deny. A policy that lists no egress rules does not ("If
+// omitted or empty, this rule does not apply at egress"), and an explicit
+// enableDefaultDeny.egress=false disables it even when rules are present.
+func (p Policy) ConstrainsEgress() bool {
+	if p.Gateway || len(p.Egress) == 0 {
+		return false
+	}
+	return p.EnableDefaultDenyEgress == nil || *p.EnableDefaultDenyEgress
+}
+
+// Matches reports whether the selector selects an endpoint carrying labels.
+func (s Selector) Matches(labels map[string]string) bool {
+	if len(s.MatchLabels) == 0 && len(s.MatchExpressions) == 0 {
+		return true // empty selector selects everything
+	}
+	for k, v := range s.MatchLabels {
+		lv, ok := labels[k]
+		if !ok || lv != v {
+			return false
+		}
+	}
+	for _, expr := range s.MatchExpressions {
+		v, ok := labels[expr.Key]
+		switch expr.Operator {
+		case "In":
+			if !ok || !contains(expr.Values, v) {
+				return false
+			}
+		case "NotIn":
+			if ok && contains(expr.Values, v) {
+				return false
+			}
+		case "Exists":
+			if !ok {
+				return false
+			}
+		case "DoesNotExist":
+			if ok {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// PolicySet is the live policy inventory, read from the API server.
+type PolicySet struct {
+	Policies []Policy
+}
+
+// FetchPolicies reads CiliumNetworkPolicy, CiliumClusterwideNetworkPolicy and
+// CiliumEgressGatewayPolicy objects. It must never be replaced by a cached
+// list: PRE-POLICED detection is only as good as the inventory.
+func FetchPolicies(ctx context.Context, c *Client) (*PolicySet, error) {
+	ps := &PolicySet{}
+	if err := ps.add(ctx, c, "/apis/cilium.io/v2/namespaces/{ns}/ciliumnetworkpolicies", "CiliumNetworkPolicy", true); err != nil {
+		return nil, err
+	}
+	if err := ps.add(ctx, c, "/apis/cilium.io/v2/ciliumclusterwidenetworkpolicies", "CiliumClusterwideNetworkPolicy", false); err != nil {
+		return nil, err
+	}
+	if err := ps.add(ctx, c, "/apis/cilium.io/v2/ciliumegressgatewaypolicies", "CiliumEgressGatewayPolicy", false); err != nil {
+		return nil, err
+	}
+	return ps, nil
+}
+
+func (ps *PolicySet) add(ctx context.Context, c *Client, path, kind string, namespaced bool) error {
+	if namespaced {
+		// List across namespaces: the all-namespaces form is the same path
+		// with namespaces() removed.
+		path = "/apis/cilium.io/v2/ciliumnetworkpolicies"
+	}
+	items, err := c.ListAll(ctx, path)
+	if err != nil {
+		return fmt.Errorf("list %s: %w", kind, err)
+	}
+	for _, raw := range items {
+		var obj struct {
+			Metadata struct {
+				Name        string            `json:"name"`
+				Namespace   string            `json:"namespace"`
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+			Spec struct {
+				Description       string   `json:"description"`
+				EndpointSelector  Selector `json:"endpointSelector"`
+				EnableDefaultDeny *struct {
+					Egress  *bool `json:"egress"`
+					Ingress *bool `json:"ingress"`
+				} `json:"enableDefaultDeny"`
+				Egress    []EgressRule `json:"egress"`
+				Selectors []struct {
+					PodSelector Selector `json:"podSelector"`
+				} `json:"selectors"`
+				DestinationCIDRs []string `json:"destinationCIDRs"`
+				ExcludedCIDRs    []string `json:"excludedCIDRs"`
+				EgressGateway    *struct {
+					EgressIP string `json:"egressIP"`
+				} `json:"egressGateway"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return fmt.Errorf("decode %s %s: %w", kind, obj.Metadata.Name, err)
+		}
+		p := Policy{
+			Kind:             kind,
+			Namespace:        obj.Metadata.Namespace,
+			Name:             obj.Metadata.Name,
+			Description:      obj.Spec.Description,
+			Selector:         obj.Spec.EndpointSelector,
+			Egress:           obj.Spec.Egress,
+			DestinationCIDRs: obj.Spec.DestinationCIDRs,
+		}
+		if obj.Spec.EnableDefaultDeny != nil {
+			p.EnableDefaultDenyEgress = obj.Spec.EnableDefaultDeny.Egress
+		}
+		for _, s := range obj.Spec.Selectors {
+			p.Selectors = append(p.Selectors, s.PodSelector)
+		}
+		if obj.Spec.EgressGateway != nil {
+			p.Gateway = true
+			p.EgressIP = obj.Spec.EgressGateway.EgressIP
+		}
+		ps.Policies = append(ps.Policies, p)
+	}
+	sort.Slice(ps.Policies, func(a, b int) bool {
+		if ps.Policies[a].Kind != ps.Policies[b].Kind {
+			return ps.Policies[a].Kind < ps.Policies[b].Kind
+		}
+		return ps.Policies[a].Name < ps.Policies[b].Name
+	})
+	return nil
+}
+
+// Selecting returns the policies whose selector matches the workload's pods,
+// plus the egress gateway policies that select it.
+func (ps *PolicySet) Selecting(w Workload) (policies []Policy, gateways []Policy) {
+	for _, p := range ps.Policies {
+		if p.Gateway {
+			for _, s := range p.Selectors {
+				if s.Matches(w.PodLabels) {
+					gateways = append(gateways, p)
+					break
+				}
+			}
+			continue
+		}
+		if p.Kind == "CiliumNetworkPolicy" && p.Namespace != w.Namespace {
+			continue
+		}
+		if p.Selector.Matches(w.PodLabels) {
+			policies = append(policies, p)
+		}
+	}
+	return policies, gateways
+}

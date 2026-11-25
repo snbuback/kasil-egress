@@ -1,0 +1,19 @@
+egress toolkit installed.
+
+  1. The collector runs as a DaemonSet and reads Cilium's dynamic flow-log
+     files from {{ .Values.collector.hostPath }} on every node. If the files do
+     not exist yet, enable Hubble and the three exporters in the cilium chart
+     first (see docs/runbooks/egress-phase1-operations.md).
+
+  2. Apply the schema once (the collector also migrates on start):
+
+       kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "egress.fullname" . }}-maintenance egress-schema-bootstrap
+
+     or run `egressctl schema apply` with EGRESS_DSN set.
+
+  3. Generate the audit report:
+
+       egressctl report --all --out reports/
+
+  4. Prometheus scrape: {{ if .Values.monitoring.serviceMonitor.enabled }}ServiceMonitor enabled.{{ else }}ServiceMonitor DISABLED. Set monitoring.serviceMonitor.enabled=true.{{ end }}
+     Alerts: {{ if .Values.monitoring.vmrule.enabled }}VMRule in {{ default .Release.Namespace .Values.monitoring.vmrule.namespace }}{{ else }}DISABLED{{ end }}.

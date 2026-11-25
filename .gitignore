@@ -1,0 +1,6 @@
+/egressd
+/egressctl
+/bin/
+/reports/
+*.tgz
+.env

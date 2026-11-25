@@ -1,0 +1,172 @@
+# Default values for the egress chart.
+#
+# The chart is generic: nothing here mentions a specific cluster except the
+# CIDRs, which every Cilium cluster must supply. The kasil-specific values live
+# in kasil-apps/apps/egress/values.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/snbuback/kasil-egress/egressd
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+cliImage:
+  repository: ghcr.io/snbuback/kasil-egress/egressctl
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Cluster parameters. These are not optional in practice: the collector uses
+# them to tell an in-cluster destination from the internet.
+cluster:
+  name: ""
+  podCIDR: 10.0.0.0/8
+  svcCIDR: 10.96.0.0/12
+  # Timezone for the hour-of-day bucket used by CRON-ONLY detection.
+  timezone: UTC
+
+postgres:
+  # Secret holding the DSN. Either point at an existing secret or let the chart
+  # create an ExternalSecret from a Bitwarden item.
+  dsnSecretName: egress-dsn
+  dsnSecretKey: uri
+  externalSecret:
+    enabled: false
+    secretStoreRef:
+      name: bitwarden-secrets
+      kind: ClusterSecretStore
+    # The Bitwarden item key that stores the full libpq URI.
+    remoteRefKey: postgres-egress-dsn
+
+collector:
+  enabled: true
+  # hostPath of the Cilium agent's flow-log directory. The agent writes to
+  # /var/run/cilium/hubble inside its own namespace, which is /run/cilium/hubble
+  # on the node.
+  hostPath: /run/cilium/hubble
+  mountPath: /var/run/cilium/hubble
+  files:
+    - audit-agg.log
+    - deny-raw.log
+    - dns-raw.log
+  batchSize: 500
+  flushInterval: 2s
+  checkpointInterval: 5s
+  spoolHostPath: /var/lib/egressd
+  metricsPort: 9110
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      cpu: 300m
+      memory: 160Mi
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+retention:
+  raw: 48h
+  hourly: 4320h      # 180 d
+  blocked: 2160h     # 90 d
+  dns: 2160h         # 90 d
+
+maintenance:
+  enabled: true
+  schedule: "17 * * * *"
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+digest:
+  enabled: true
+  schedule: "0 7 * * 1"     # Mondays 07:00 cluster time
+  # Discord-compatible webhook. Leave empty to skip the POST (the digest is
+  # still written to the log).
+  webhookURL: ""
+  webhookSecretName: ""
+  webhookSecretKey: url
+  sinceHours: 168
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+auditGuard:
+  enabled: true
+  schedule: "23 * * * *"
+  # Fail once policyAuditMode has been on for longer than this.
+  maxDuration: 72h
+  stateConfigMap: audit-guard-state
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    # VictoriaMetrics' operator selects ServiceMonitors by namespace selector,
+    # which this stack leaves open, so the object can live next to the chart.
+    labels: {}
+  dashboard:
+    enabled: true
+    labels:
+      grafana_dashboard: "1"
+  vmrule:
+    enabled: true
+    # VMRules are evaluated by VMAlert, which only loads rules from its own
+    # namespace by default. Render into the monitoring namespace, with the
+    # labels its ruleSelector expects.
+    namespace: ""
+    labels: {}
+
+policies:
+  # Cluster-wide DNS + apiserver baseline. Applied in Phase 1 (it installs the
+  # DNS proxy path) and required before any per-workload default-deny.
+  baselineDNS: true
+  # Documented exemptions: an explicit, visible no-op that selects the
+  # namespace and never enables default-deny.
+  exemptions:
+    - kube-system
+    - piraeus-datastore
+  # Extra per-workload policies, rendered from files/policies/<ns>/<workload>.yaml.
+  generated: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

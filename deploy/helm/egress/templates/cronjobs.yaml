@@ -1,0 +1,162 @@
+{{- if .Values.maintenance.enabled }}
+# Retention and rollup. One job, one transaction per statement: partitions are
+# created ahead of time, complete hours are rolled up, expired partitions are
+# dropped and dns_name is pruned.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "egress.fullname" . }}-maintenance
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance
+spec:
+  schedule: {{ .Values.maintenance.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "egress.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: maintenance
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "egress.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: maintain
+              image: {{ include "egress.cliImage" . }}
+              imagePullPolicy: {{ .Values.cliImage.pullPolicy }}
+              args:
+                - maintain
+                - --retention-raw={{ .Values.retention.raw }}
+                - --retention-hourly={{ .Values.retention.hourly }}
+                - --retention-blocked={{ .Values.retention.blocked }}
+                - --retention-dns={{ .Values.retention.dns }}
+              env:
+                {{- include "egress.dsnEnv" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.maintenance.resources | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts:
+                {{- include "egress.dsnVolumeMount" . | nindent 16 }}
+          volumes:
+            {{- include "egress.dsnVolume" . | nindent 12 }}
+{{- end }}
+{{- if .Values.digest.enabled }}
+---
+# "Periodically review" as an inbox item rather than a good intention.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "egress.fullname" . }}-digest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: digest
+spec:
+  schedule: {{ .Values.digest.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "egress.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: digest
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "egress.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: digest
+              image: {{ include "egress.cliImage" . }}
+              imagePullPolicy: {{ .Values.cliImage.pullPolicy }}
+              args:
+                - digest
+                - --since={{ .Values.digest.sinceHours }}h
+                {{- if .Values.digest.webhookURL }}
+                - --webhook-url={{ .Values.digest.webhookURL }}
+                {{- else if .Values.digest.webhookSecretName }}
+                - --webhook-url=$(DIGEST_WEBHOOK_URL)
+                {{- end }}
+              env:
+                {{- include "egress.dsnEnv" . | nindent 16 }}
+                {{- if and (not .Values.digest.webhookURL) .Values.digest.webhookSecretName }}
+                - name: DIGEST_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.digest.webhookSecretName }}
+                      key: {{ .Values.digest.webhookSecretKey }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.digest.resources | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts:
+                {{- include "egress.dsnVolumeMount" . | nindent 16 }}
+          volumes:
+            {{- include "egress.dsnVolume" . | nindent 12 }}
+{{- end }}
+{{- if .Values.auditGuard.enabled }}
+---
+# policyAuditMode disables enforcement for the whole agent, and Cilium exposes
+# no metric for it, so the only way to notice it being left on is to check the
+# effective configuration. This job fails (and the existing failed-Job alert
+# pages) once it has been on for longer than maxDuration.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "egress.fullname" . }}-audit-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-guard
+spec:
+  schedule: {{ .Values.auditGuard.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "egress.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: audit-guard
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "egress.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: audit-guard
+              image: {{ include "egress.cliImage" . }}
+              imagePullPolicy: {{ .Values.cliImage.pullPolicy }}
+              args:
+                - audit-guard
+                - --max-duration={{ .Values.auditGuard.maxDuration }}
+                - --state-configmap={{ .Release.Namespace }}/{{ .Values.auditGuard.stateConfigMap }}
+              env:
+                {{- include "egress.dsnEnv" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.auditGuard.resources | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts:
+                {{- include "egress.dsnVolumeMount" . | nindent 16 }}
+          volumes:
+            {{- include "egress.dsnVolume" . | nindent 12 }}
+{{- end }}

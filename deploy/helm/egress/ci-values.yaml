@@ -1,0 +1,17 @@
+# Values used by `make chart` and CI: everything enabled, so a template that
+# only breaks in one configuration is caught.
+cluster:
+  name: test
+  podCIDR: 172.16.0.0/16
+  svcCIDR: 172.30.0.0/16
+  timezone: Europe/Dublin
+postgres:
+  externalSecret:
+    enabled: true
+monitoring:
+  vmrule:
+    namespace: victoria
+    labels:
+      app.kubernetes.io/instance: victoria
+digest:
+  webhookSecretName: egress-webhook
