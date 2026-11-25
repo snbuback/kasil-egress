@@ -94,7 +94,11 @@ egressctl review 12345 --state allowed_forever --reason "renovate now uses api.g
 * if an existing policy already constrains the workload, its allowed set is a
   **ceiling**: a generated policy can only add peers, so rules outside it are
   dropped (`pre-policed-dropped`) and `lint` fails unless the widening is
-  explicitly acknowledged.
+  explicitly acknowledged;
+* the pipeline's own objects (the chart's baseline and exemptions, and every
+  generated policy — `egress.kasil.io/owned: "true"`) are never a ceiling: they
+  are replaced wholesale on the next plan, so a committed shadow policy cannot
+  block its own regeneration.
 
 ## Components
 
