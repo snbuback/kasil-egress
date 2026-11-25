@@ -138,7 +138,9 @@ egressctl report --show-policy-inventory         # the pre-existing objects, liv
 
 Acceptance (§9.4): S1 and S2 met; every workload has an allowlist candidate or
 an explicit exemption; zero ingestion errors over 48 h; the report is
-committed so Phase 2 diffs against a frozen baseline.
+committed so Phase 2 diffs against a frozen baseline. Close-out checklist:
+the digest has posted to Discord at least once (§1.2), and the kube3 memory
+gate from §1.1 was recorded pre-merge and re-measured after the rollout.
 
 `--coverage` prints two percentages over **running** workloads outside the
 exempt namespaces (a scaled-to-zero Deployment or a suspended CronJob is
