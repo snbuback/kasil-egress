@@ -8,6 +8,11 @@ cluster:
 postgres:
   externalSecret:
     enabled: true
+    compose:
+      enabled: true
+      passwordKey: postgres-pass-egress
+      host: kasil-postgres-rw.cnpg-system.svc
+      database: egress
 monitoring:
   vmrule:
     namespace: victoria

@@ -38,8 +38,17 @@ postgres:
     secretStoreRef:
       name: bitwarden-secrets
       kind: ClusterSecretStore
-    # The Bitwarden item key that stores the full libpq URI.
+    # Either point at a Bitwarden item holding the full libpq URI…
     remoteRefKey: postgres-egress-dsn
+    # …or compose it from the role password that the database provisioning
+    # already stores, so the credential exists in exactly one place.
+    compose:
+      enabled: false
+      passwordKey: ""       # e.g. postgres-pass-egress
+      username: egress
+      host: ""              # e.g. postgres-rw.db.svc
+      port: 5432
+      database: egress
 
 collector:
   enabled: true
