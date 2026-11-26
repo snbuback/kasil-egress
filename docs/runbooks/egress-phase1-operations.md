@@ -9,6 +9,24 @@ runbook denies traffic: the only policy applied is the baseline, and its
 Land the `cilium` values change (§7 of `docs/design.md`). Then verify, in this
 order — each check catches a different failure mode.
 
+The Hubble CA is issued by **cert-manager**, not by the helm templates:
+`hubble.tls.auto.method` is `certmanager` and the `selfsigned` ClusterIssuer
+(CA issuer backed by `root-secret`, `apps/cert-manager/templates/selfsigned.yaml`)
+signs both leaf pairs. That is what keeps the `cilium` Application `Synced` —
+the helm method's `genCA`/`lookup` pair regenerates the CA on every render and
+would rotate it on every sync. Check the certificates first, because a missing
+one looks like a CNI problem but is not: the agent's `hubble-tls` mount is
+`optional`, the relay's is not, so the relay pod sits in `ContainerCreating`
+while the agents run.
+
+```sh
+kubectl -n kube-system get certificate hubble-server-certs hubble-relay-client-certs
+# want: READY=True on both
+kubectl -n kube-system describe certificate hubble-server-certs | sed -n '/Events/,$p'
+# Ready=False + `ClusterIssuer "selfsigned" not found` => the cert-manager app
+# has not synced yet (cold bootstrap: cilium first, then cert-manager).
+```
+
 ```sh
 # Hubble is on and the relay runs on the pinned node.
 kubectl -n kube-system exec ds/cilium -- cilium-dbg status --all-health | grep -i hubble
@@ -30,6 +48,31 @@ kubectl -n kube-system exec ds/cilium -- sh -c 'tail -1 /var/run/cilium/hubble/a
 
 If `dns-raw` has port-53 records but no `l7.dns` block, DNS is not going
 through the proxy: the baseline CCNP is missing (step 1.2a in the design).
+
+### 1.0 Pre-Hubble baseline snapshot (do this BEFORE the merge)
+
+Design §9.1 step 1.0. Hubble turns on at merge, so the "before" picture is only
+capturable now: once the exporters run, every query answers "what is talking to
+what *since the rollout*", which cannot tell a new edge from a pre-existing one.
+Capture all four and paste them into the PR description (or attach them to the
+Phase 1 report as the appendix "before").
+
+```sh
+D=$(date -u +%Y%m%dT%H%M%SZ)
+# 1. Inventory: one line per workload, not per pod (that is the report's unit).
+kubectl get deploy,sts,ds,cronjob,job -A \
+  -o custom-columns=NS:.metadata.namespace,KIND:.kind,NAME:.metadata.name > baseline-$D-workloads.txt
+# 2. Node capacity and what is already reserved.
+kubectl get nodes -o custom-columns=NODE:.metadata.name,CPU:.status.capacity.cpu,MEM:.status.capacity.memory,ALLOC_MEM:.status.allocatable.memory > baseline-$D-nodes.txt
+kubectl top nodes >> baseline-$D-nodes.txt
+# 3. Policy inventory: what already constrains egress today. This is the
+#    never-widen baseline `egressctl lint` will compare against.
+kubectl get cnp,ccnp -A -o yaml > baseline-$D-policies.yaml
+kubectl get netpol -A -o yaml > baseline-$D-netpol.yaml
+# 4. Prove Hubble is still off, so the snapshot is unambiguous.
+kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.enable-hubble}{"\n"}'
+# want: false (or an unset key) — repeat after the sync and expect true
+```
 
 ### 1.1 kube3 memory gate (measure before Hubble lands there)
 
